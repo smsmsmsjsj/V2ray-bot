@@ -49,8 +49,6 @@ VOLUMES = {
     "v200": (200, {"d1": 470000, "d2": 890000, "d3": 1250000, "d5": 1880000, "d12": 3700000}),
 }
 
-# توجه: قیمت‌های بالا نمونه هستن. برای ویرایش فقط اعداد همین دیکشنری VOLUMES رو عوض کن.
-
 # ============== متن‌ها ==============
 WELCOME = "🚀 به فروشگاه V2Ray خوش آمدید\n\nیکی از گزینه‌ها رو انتخاب کن:"
 
@@ -64,10 +62,8 @@ BTN_INVITE = "👥 معرفی به دوستان"
 BTN_SUPPORT = "🧑‍💻 تماس با پشتیبانی"
 BTN_AGENT = "🤝 درخواست نمایندگی"
 
-SOON = {BTN_RENEW, BTN_MY, BTN_HELP, BTN_CREDIT, BTN_INVITE, BTN_AGENT}
+SOON = {BTN_INVITE, BTN_AGENT}
 
-# کاربرهایی که تست گرفتن (برای جلوگیری از تکرار) - در حافظه؛ بعد از ری‌استارت بات پاک می‌شه
-# برای دائمی بودن باید تو فایل یا دیتابیس ذخیره بشه (پایین توضیح دادم)
 TEST_USED_FILE = "test_used.txt"
 
 
@@ -164,7 +160,6 @@ def join_keyboard():
 
 
 async def require_join(update_or_query, context, user_id):
-    """اگه عضو نبود پیام عضویت می‌فرسته و True برمی‌گردونه (یعنی باید متوقف بشه)"""
     bot = context.bot
     if await is_member(bot, user_id):
         return False
@@ -178,12 +173,6 @@ async def require_join(update_or_query, context, user_id):
 
 # ============== پنل پاسارگاد (API) ==============
 async def panel_create_user(username: str, gb: float, days: int):
-    """
-    کاربر جدید تو پنل پاسارگاد می‌سازه.
-    gb: حجم به گیگابایت (برای کل مدت، نه ماهانه)
-    days: تعداد روز اعتبار
-    برمی‌گردونه: (success: bool, subscription_url یا پیام خطا: str)
-    """
     data_limit_bytes = int(gb * 1024 * 1024 * 1024)
     expire_timestamp = int((datetime.now(timezone.utc) + timedelta(days=days)).timestamp())
 
@@ -224,7 +213,6 @@ _GROUP_CACHE = {"ids": None}
 
 
 async def get_group_ids():
-    """آیدی گروه رو بر اساس اسمش از پنل می‌گیره و کش می‌کنه."""
     if _GROUP_CACHE["ids"] is not None:
         return _GROUP_CACHE["ids"]
 
@@ -243,7 +231,6 @@ async def get_group_ids():
     except Exception as e:
         logger.warning(f"خطا در گرفتن گروه‌ها: {e}")
 
-    # اگه نشد پیدا کنه، اگه PANEL_GROUP_ID یه عدد باشه مستقیم همونو برمی‌گردونه
     try:
         gid = int(PANEL_GROUP_NAME)
         _GROUP_CACHE["ids"] = [gid]
@@ -251,7 +238,7 @@ async def get_group_ids():
     except ValueError:
         pass
 
-    _GROUP_CACHE["ids"] = [1]  # fallback پیش‌فرض
+    _GROUP_CACHE["ids"] = [1]
     return _GROUP_CACHE["ids"]
 
 
@@ -282,12 +269,39 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
 
-    if text == BTN_NEW:
+    if text in (BTN_NEW, BTN_RENEW):
         await update.message.reply_text("⏳ انتخاب مدت زمان:", reply_markup=duration_menu())
         return
 
     if text == BTN_TEST:
         await handle_test_request(update, context)
+        return
+
+    if text == BTN_MY:
+        await update.message.reply_text(
+            "📲 سرویس‌های من:\n\n"
+            "برای مشاهده مشخصات، حجم مصرفی و وضعیت سرویس خود، لطفاً لینک اشتراک خود را در اپلیکیشن مربوطه بررسی کنید یا در صورت گم شدن لینک، با پشتیبانی در ارتباط باشید.",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    if text == BTN_CREDIT:
+        await update.message.reply_text(
+            f"💰 اعتبار حساب شما: 0 تومان\n\n"
+            f"جهت افزایش اعتبار یا خرید سرویس جدید از منوی اصلی اقدام کنید.",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    if text == BTN_HELP:
+        await update.message.reply_text(
+            "💡 آموزش استفاده از سرویس‌ها:\n\n"
+            "• اندروید: اپلیکیشن v2rayNG\n"
+            "• آیفون: اپلیکیشن FoXray یا Napstermark\n"
+            "• ویندوز: اپلیکیشن v2rayN\n\n"
+            f"پس از خرید، لینک اشتراک خود را کپی کرده و در نرم‌افزار وارد کنید. در صورت نیاز به راهنمایی بیشتر با {SUPPORT} در ارتباط باشید.",
+            reply_markup=main_keyboard()
+        )
         return
 
     if text == BTN_SUPPORT:
@@ -371,7 +385,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """وقتی مشتری عکس رسید می‌فرسته"""
     user_id = update.effective_user.id
     order = context.user_data.get("order")
 
@@ -418,7 +431,6 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
                                        text=f"❌ متاسفانه رسید شما تایید نشد. لطفاً با پشتیبانی تماس بگیرید: {SUPPORT}")
         return
 
-    # تایید شد -> ساخت کاربر در پنل
     await query.edit_message_caption(caption=query.message.caption + "\n\n⏳ در حال ساخت کاربر در پنل...")
     username = f"user_{user_id}_{int(datetime.now().timestamp())}"
     success, result = await panel_create_user(username, gb=gb, days=days)
