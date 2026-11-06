@@ -234,6 +234,29 @@ async def panel_create_user(username: str, gb: float, days: int):
         return False, f"خطا در اتصال به پنل: {e}"
 
 
+async def panel_change_status(username: str, status: str):
+    headers = {"X-Api-Key": PANEL_API_KEY, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=20.0, verify=True) as client:
+            resp = await client.put(f"{PANEL_URL}/api/user/{username}", headers=headers, json={"status": status})
+            return resp.status_code in (200, 201)
+    except Exception:
+        return False
+
+
+async def panel_reset_sub(username: str):
+    headers = {"X-Api-Key": PANEL_API_KEY}
+    try:
+        async with httpx.AsyncClient(timeout=20.0, verify=True) as client:
+            resp = await client.post(f"{PANEL_URL}/api/user/{username}/reset", headers=headers)
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                return data.get("subscription_url") or ""
+        return ""
+    except Exception:
+        return ""
+
+
 _GROUP_CACHE = {"ids": None}
 
 
@@ -527,6 +550,37 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg_text, parse_mode="Markdown", reply_markup=service_markup)
         return
 
+    if data.startswith("stop_"):
+        uname = data[5:]
+        success = await panel_change_status(uname, "disabled")
+        if success:
+            await query.answer("⏹ سرویس با موفقیت متوقف شد.", show_alert=True)
+        else:
+            await query.answer("❌ خطا در توقف سرویس.", show_alert=True)
+        return
+
+    if data.startswith("reset_"):
+        uname = data[6:]
+        new_sub = await panel_reset_sub(uname)
+        if new_sub:
+            lines = load_lines(SERVICES_FILE)
+            new_lines = []
+            for line in lines:
+                parts = line.split("|")
+                if len(parts) >= 5 and parts[1] == uname:
+                    parts[4] = new_sub
+                new_lines.append("|".join(parts))
+            with open(SERVICES_FILE, "w", encoding="utf-8") as f:
+                f.write("\n".join(new_lines) + "\n")
+            await query.answer("✅ لینک جدید با موفقیت دریافت شد.", show_alert=True)
+        else:
+            await query.answer("❌ خطا در ریست کردن لینک.", show_alert=True)
+        return
+
+    if data.startswith("note_"):
+        await query.answer("ویرایش یادداشت از طریق پنل مدیریت فعال است.", show_alert=True)
+        return
+
     if data == "back_to_services":
         user_id = query.from_user.id
         lines = load_lines(SERVICES_FILE)
@@ -554,10 +608,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sub_link:
             qr_buf = generate_qr_buffer(sub_link)
             await query.message.reply_photo(photo=InputFile(qr_buf, filename="qr.png"), caption=f"📥 QR Code مربوط به نام کاربری: `{uname}`", parse_mode="Markdown")
-        return
-
-    if data.startswith("stop_") or data.startswith("reset_") or data.startswith("note_"):
-        await query.answer("این قابلیت به‌زودی فعال می‌شود.", show_alert=True)
         return
 
     if data.startswith("hlp_"):
