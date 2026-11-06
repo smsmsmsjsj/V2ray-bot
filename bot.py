@@ -1,12 +1,14 @@
 import os
 import logging
 import threading
+from io import BytesIO
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import qrcode
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
-                      ReplyKeyboardMarkup)
+                      ReplyKeyboardMarkup, InputFile)
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           MessageHandler, filters, ContextTypes)
 
@@ -14,7 +16,7 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ============== تنظیمات (از Environment Variables خونده می‌شه) ==============
+# ============== تنظیمات (از Environment Variables) ==============
 TOKEN = os.environ.get("BOT_TOKEN", "")
 SUPPORT = os.environ.get("SUPPORT_USERNAME", "@Dudgeuvsuvduv")
 
@@ -31,7 +33,7 @@ PANEL_GROUP_NAME = os.environ.get("PANEL_GROUP_ID", "group1")
 
 PORT = int(os.environ.get("PORT", "10000"))
 
-# ============== تعرفه‌ها (حجم برای کل مدت، نه ماهانه) ==============
+# ============== تعرفه‌ها ==============
 DURATIONS = {
     "d1": ("1 ماهه", 30),
     "d2": ("2 ماهه", 60),
@@ -51,7 +53,7 @@ VOLUMES = {
     "v200": (200, {"d1": 600000, "d2": 650000, "d3": 780000, "d5": 1000000, "d12": 1200000}),
 }
 
-# ============== متن‌ها ==============
+# ============== متن‌ها و دکمه‌ها ==============
 WELCOME = "🚀 به فروشگاه V2Ray خوش آمدید\n\nیکی از گزینه‌ها رو انتخاب کن:"
 
 BTN_NEW = "🚀 خرید سرویس جدید"
@@ -68,6 +70,7 @@ TEST_USED_FILE = "test_used.txt"
 SERVICES_FILE = "user_services.txt"
 REFERRALS_FILE = "referrals.txt"
 AGENT_REQUESTS_FILE = "agent_requests.txt"
+USERS_JOIN_FILE = "users_join_date.txt"
 
 
 def load_lines(path):
@@ -90,6 +93,17 @@ def fmt(n):
     return f"{n:,}"
 
 
+def generate_qr_buffer(url: str) -> BytesIO:
+    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    bio = BytesIO()
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
+
+
 # ============== کیبوردها ==============
 def main_keyboard():
     return ReplyKeyboardMarkup(
@@ -107,7 +121,7 @@ def main_keyboard():
 def duration_menu():
     rows = [[InlineKeyboardButton(t, callback_data=f"dur_{k}")]
             for k, (t, _) in DURATIONS.items()]
-    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -128,6 +142,16 @@ def confirm_menu(dk, vk):
     ])
 
 
+def help_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("V2rayNG", callback_data="hlp_v2rayng"), InlineKeyboardButton("Streisand", callback_data="hlp_streisand")],
+        [InlineKeyboardButton("Happ", callback_data="hlp_happ"), InlineKeyboardButton("V2rayTun", callback_data="hlp_v2raytun")],
+        [InlineKeyboardButton("Android", callback_data="hlp_android"), InlineKeyboardButton("iOS", callback_data="hlp_ios")],
+        [InlineKeyboardButton("Windows", callback_data="hlp_windows")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")],
+    ])
+
+
 def admin_decision_keyboard(user_id, dk, vk):
     return InlineKeyboardMarkup([
         [
@@ -145,7 +169,7 @@ def order_text(dk, vk):
             f"💰 قیمت: {fmt(prices[dk])} تومان")
 
 
-# ============== بررسی عضویت اجباری کانال ==============
+# ============== بررسی عضویت کانال ==============
 async def is_member(bot, user_id):
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
@@ -203,12 +227,10 @@ async def panel_create_user(username: str, gb: float, days: int):
                           or "")
                 if isinstance(sub_url, list):
                     sub_url = "\n".join(sub_url)
-                return True, sub_url or "کاربر ساخته شد ولی لینک برنگشت. از پنل چک کن."
+                return True, sub_url or "کاربر ساخته شد ولی لینک برنگشت."
             else:
-                logger.error(f"خطای پنل: {resp.status_code} - {resp.text}")
                 return False, f"خطای پنل ({resp.status_code}): {resp.text[:300]}"
     except Exception as e:
-        logger.exception("خطا در اتصال به پنل")
         return False, f"خطا در اتصال به پنل: {e}"
 
 
@@ -230,9 +252,8 @@ async def get_group_ids():
                     if str(g.get("name", "")).lower() == str(PANEL_GROUP_NAME).lower():
                         _GROUP_CACHE["ids"] = [g["id"]]
                         return _GROUP_CACHE["ids"]
-                logger.warning(f"گروه '{PANEL_GROUP_NAME}' پیدا نشد؛ لیست گروه‌ها: {items}")
-    except Exception as e:
-        logger.warning(f"خطا در گرفتن گروه‌ها: {e}")
+    except Exception:
+        pass
 
     try:
         gid = int(PANEL_GROUP_NAME)
@@ -250,7 +271,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("order", None)
     user_id = update.effective_user.id
 
-    # بررسی لینک دعوت (ref_<id>)
+    # ثبت تاریخ ورود کاربر
+    users_data = load_lines(USERS_JOIN_FILE)
+    if not any(line.startswith(f"{user_id}|") for line in users_data):
+        now_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        append_line(USERS_JOIN_FILE, f"{user_id}|{now_str}")
+
     if context.args:
         arg = context.args[0]
         if arg.startswith("ref_"):
@@ -300,26 +326,44 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == BTN_CREDIT:
-        await update.message.reply_text(
-            f"💰 اعتبار حساب شما: 0 تومان\n\n"
-            f"جهت افزایش اعتبار یا خرید سرویس جدید از منوی اصلی اقدام کنید.",
-            reply_markup=main_keyboard()
+        lines = load_lines(SERVICES_FILE)
+        my_services = [line for line in lines if line.split("|")[0] == str(user_id)]
+        
+        users_data = load_lines(USERS_JOIN_FILE)
+        join_date = "نامشخص"
+        for u in users_data:
+            parts = u.split("|")
+            if len(parts) >= 2 and parts[0] == str(user_id):
+                join_date = parts[1]
+
+        credit_text = (
+            f"👤 **اطلاعات حساب کاربری شما:**\n\n"
+            f"💰 موجودی: 0 تومان\n"
+            f"🆔 آیدی عددی: `{user_id}`\n"
+            f"📦 تعداد سرویس‌ها: {len(my_services)}\n"
+            f"📅 تاریخ ورود به بات: {join_date}"
         )
+        credit_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 افزایش موجودی", callback_data="add_credit")],
+            [InlineKeyboardButton("🎁 اعمال کد هدیه", callback_data="gift_code")],
+            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]
+        ])
+        await update.message.reply_text(credit_text, parse_mode="Markdown", reply_markup=credit_markup)
         return
 
     if text == BTN_HELP:
-        await update.message.reply_text(
-            "💡 آموزش استفاده از سرویس‌ها:\n\n"
-            "• اندروید: اپلیکیشن v2rayNG\n"
-            "• آیفون: اپلیکیشن FoXray یا Napstermark\n"
-            "• ویندوز: اپلیکیشن v2rayN\n\n"
-            f"پس از خرید، لینک اشتراک خود را کپی کرده و در نرم‌افزار وارد کنید. در صورت نیاز به راهنمایی بیشتر با {SUPPORT} در ارتباط باشید.",
-            reply_markup=main_keyboard()
-        )
+        await update.message.reply_text("لطفا یک گزینه را انتخاب نمایید:", reply_markup=help_menu())
         return
 
     if text == BTN_SUPPORT:
-        await update.message.reply_text(f"برای ارتباط با پشتیبانی پیام بده: {SUPPORT}")
+        support_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 ارسال پیام به پشتیبانی", url=f"https://t.me/{SUPPORT.lstrip('@')}")],
+            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]
+        ])
+        await update.message.reply_text(
+            "لطفا در قالب یک پیام درخواست و نکات قابل ملاحظه درباره خود را ارسال کرده و سپس تا تماس از طرف ادمین منتظر بمانید",
+            reply_markup=support_markup
+        )
         return
 
     if text == BTN_INVITE:
@@ -344,14 +388,25 @@ async def handle_my_services(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=main_keyboard())
         return
 
-    text = "📲 سرویس‌های شما:\n\n"
-    for i, line in enumerate(my_services, 1):
+    for line in my_services:
         parts = line.split("|")
-        # ساختار: user_id|username|title|gb|sub_link
         _, uname, title, gb, sub_link = parts[0], parts[1], parts[2], parts[3], parts[4]
-        text += f"{i}. {title} | {gb} گیگ\n🔗 {sub_link}\n\n"
-
-    await update.message.reply_text(text, reply_markup=main_keyboard())
+        
+        msg_text = (
+            f"📲 **اطلاعات سرویس شما**\n\n"
+            f"👤 نام کاربری: `{uname}`\n"
+            f"📦 حجم سرویس: {gb} گیگابایت\n"
+            f"⏳ نوع اشتراک: {title}\n\n"
+            f"🔗 **لینک اشتراک:**\n`{sub_link}`"
+        )
+        qr_buf = generate_qr_buffer(sub_link)
+        
+        service_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 دریافت QR Code", callback_data=f"qr_{uname}")],
+            [InlineKeyboardButton("♻️ تمدید سرویس", callback_data="new")],
+            [InlineKeyboardButton("❌ حذف کامل اکانت", callback_data=f"del_{uname}")]
+        ])
+        await update.message.reply_photo(photo=InputFile(qr_buf, filename="qr.png"), caption=msg_text, parse_mode="Markdown", reply_markup=service_markup)
 
 
 async def handle_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -360,13 +415,21 @@ async def handle_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = f"https://t.me/{bot_username}?start=ref_{user_id}"
 
     referrals = load_lines(REFERRALS_FILE)
-    count = sum(1 for line in referrals if line.split("|")[0] == str(user_id))
+    my_refs = [line for line in referrals if line.split("|")[0] == str(user_id)]
+    count = len(my_refs)
 
-    await update.message.reply_text(
-        f"👥 لینک دعوت اختصاصی شما:\n\n{link}\n\n"
-        f"تعداد دوستان دعوت‌شده: {count} نفر\n\n"
-        f"این لینک را برای دوستانتان ارسال کنید.",
-        reply_markup=main_keyboard())
+    invite_text = (
+        f"✨ دریافت سرویس‌های ایمن و پر سرعت بدون معطلی از طریق ربات\n\n"
+        f"🔗 برای معرفی ربات به دوستان خود می‌توانید پیام بالا را برای دوستان خود ارسال کنید.\n\n"
+        f"🎁 در صورت معرفی دوستان خود با لینک بالا، با هر خرید موفق هر کدام از آن‌ها 5% به عنوان هدیه به کیف پول شما واریز می‌گردد.\n\n"
+        f"📊 **آمار دعوت شما**\n"
+        f"• افراد وارد شده با لینک: {count}\n"
+        f"• تعداد خرید ها: 0\n"
+        f"• مبلغ خرید ها در یک ماه گذشته: 0 تومان\n\n"
+        f"👇 **لینک اختصاصی دعوت شما:**\n`{link}`"
+    )
+    back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]])
+    await update.message.reply_text(invite_text, parse_mode="Markdown", reply_markup=back_markup)
 
 
 async def handle_agent_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -383,9 +446,10 @@ async def handle_agent_request(update: Update, context: ContextTypes.DEFAULT_TYP
              f"🆔 یوزرنیم: @{username}\n"
              f"🔢 آیدی: {user_id}"))
 
+    agent_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]])
     await update.message.reply_text(
-        "🤝 درخواست نمایندگی شما ثبت شد. به‌زودی ادمین با شما تماس می‌گیرد.",
-        reply_markup=main_keyboard())
+        "لطفا در قالب یک پیام درخواست و نکات قابل ملاحظه درباره خود را ارسال کرده و سپس تا تماس از طرف ادمین منتظر بمانید",
+        reply_markup=agent_markup)
 
 
 async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -394,7 +458,7 @@ async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ شما قبلاً اکانت تست گرفته‌اید. هر کاربر فقط یک بار می‌تواند تست بگیرد.")
         return
 
-    await update.message.reply_text("⏳ در حال ساخت اکانت تست (۱۰۰ مگ، ۱ روزه)...")
+    await update.message.reply_text("⏳ در حال ساخت اکانت تست...")
     username = f"test_{user_id}_{int(datetime.now().timestamp())}"
     success, result = await panel_create_user(username, gb=0.1, days=1)
 
@@ -402,9 +466,16 @@ async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         TEST_USED.add(str(user_id))
         append_line(TEST_USED_FILE, str(user_id))
         append_line(SERVICES_FILE, f"{user_id}|{username}|اکانت تست|0.1|{result}")
-        await update.message.reply_text(
-            f"✅ اکانت تست شما ساخته شد!\n\n🔗 لینک اشتراک:\n{result}\n\n"
-            f"این اکانت ۱۰۰ مگابایت حجم و ۱ روز اعتبار دارد.")
+        
+        caption_text = (
+            f"🟢 اشتراک شما با موفقیت ساخته شد.\n"
+            f"👤 نام کاربری: `{username}`\n\n"
+            f"🔗 **لینک اشتراک شما:**\n`{result}`\n\n"
+            f"📲 برای کپی کردن لینک بالا فقط کافیست آدرس لینک را یک بار لمس کنید!"
+        )
+        qr_buf = generate_qr_buffer(result)
+        test_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]])
+        await update.message.reply_photo(photo=InputFile(qr_buf, filename="test_qr.png"), caption=caption_text, parse_mode="Markdown", reply_markup=test_markup)
     else:
         await update.message.reply_text(f"❌ متاسفانه مشکلی پیش اومد:\n{result}\n\nبا پشتیبانی تماس بگیر: {SUPPORT}")
 
@@ -420,8 +491,32 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if data == "menu":
-        await query.edit_message_text(WELCOME)
-        await context.bot.send_message(chat_id=query.from_user.id, text="منوی اصلی:", reply_markup=main_keyboard())
+        await query.message.delete()
+        await context.bot.send_message(chat_id=query.from_user.id, text=WELCOME, reply_markup=main_keyboard())
+        return
+
+    if data == "add_credit" or data == "gift_code":
+        await query.message.reply_text("این بخش به‌زودی فعال خواهد شد.", reply_markup=main_keyboard())
+        return
+
+    if data.startswith("hlp_"):
+        app_key = data[4:]
+        help_texts = {
+            "v2rayng": "📱 **آموزش استفاده از V2rayNG (اندروید):**\n\n1. اپلیکیشن V2rayNG را دانلود و نصب کنید.\n2. لینک اشتراک خود را از ربات کپی کنید.\n3. وارد برنامه شده، روی دکمه + یا گوشه بالا بزنید و گزینه Import config from clipboard را انتخاب کنید.\n4. روی دکمه اتصال در پایین صفحه بزنید.",
+            "streisand": "🍎 **آموزش استفاده از Streisand (آیفون):**\n\n1. اپلیکیشن Streisand را از اپ‌استور دانلود کنید.\n2. لینک اشتراک را کپی کرده و داخل برنامه وارد نمایید.",
+            "happ": "📱 **آموزش استفاده از Happ:**\n\n1. برنامه را نصب و باز کنید.\n2. لینک اشتراک را ایمپورت کنید.",
+            "v2raytun": "🚀 **آموزش استفاده از V2rayTun:**\n\n1. اپلیکیشن را باز کرده و لینک اشتراک را اضافه کنید.",
+            "android": "🤖 **راهنمای اندروید:** استفاده از V2rayNG بهترین گزینه است.",
+            "ios": "🍏 **راهنمای آیفون:** استفاده از Streisand یا Foxray.",
+            "windows": "💻 **راهنمای ویندوز:** استفاده از نرم‌افزار v2rayN."
+        }
+        text = help_texts.get(app_key, "آموزش یافت نشد.")
+        back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به آموزش‌ها", callback_data="back_to_help")]])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_markup)
+        return
+
+    if data == "back_to_help":
+        await query.edit_message_text("لطفا یک گزینه را انتخاب نمایید:", reply_markup=help_menu())
         return
 
     if data == "new":
@@ -512,12 +607,15 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
     if success:
         append_line(SERVICES_FILE, f"{user_id}|{username}|{title}|{gb}|{result}")
         await query.edit_message_caption(caption=query.message.caption + "\n\n✅ تایید شد و کاربر ساخته شد.")
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=(f"🎉 پرداخت شما تایید شد!\n\n"
-                 f"⏳ مدت: {title}\n"
-                 f"📦 حجم: {gb} گیگ\n\n"
-                 f"🔗 لینک اشتراک شما:\n{result}"))
+        
+        caption_text = (
+            f"🎉 پرداخت شما تایید شد!\n\n"
+            f"⏳ مدت: {title}\n"
+            f"📦 حجم: {gb} گیگ\n\n"
+            f"🔗 **لینک اشتراک شما:**\n`{result}`"
+        )
+        qr_buf = generate_qr_buffer(result)
+        await context.bot.send_photo(chat_id=user_id, photo=InputFile(qr_buf, filename="sub_qr.png"), caption=caption_text, parse_mode="Markdown")
     else:
         await query.edit_message_caption(caption=query.message.caption + f"\n\n❌ خطا در ساخت کاربر:\n{result}")
         await context.bot.send_message(
@@ -525,7 +623,7 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             text=f"پرداخت شما تایید شد ولی در ساخت سرویس مشکلی پیش اومد. پشتیبانی به‌زودی بهتون سرویس رو می‌ده: {SUPPORT}")
 
 
-# ============== سرور کوچیک برای زنده نگه داشتن سرویس (UptimeRobot) ==============
+# ============== سرور سلامت برای UptimeRobot ==============
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -534,7 +632,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK - bot is running")
 
     def log_message(self, format, *args):
-        pass  # لاگ‌های اضافه رو خاموش می‌کنیم
+        pass
 
 
 def run_health_server():
