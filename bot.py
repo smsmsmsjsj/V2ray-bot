@@ -144,9 +144,8 @@ def confirm_menu(dk, vk):
 
 def help_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("V2rayNG", callback_data="hlp_v2rayng"), InlineKeyboardButton("Streisand", callback_data="hlp_streisand")],
-        [InlineKeyboardButton("Happ", callback_data="hlp_happ"), InlineKeyboardButton("V2rayTun", callback_data="hlp_v2raytun")],
-        [InlineKeyboardButton("Android", callback_data="hlp_android"), InlineKeyboardButton("iOS", callback_data="hlp_ios")],
+        [InlineKeyboardButton("Android", callback_data="hlp_android")],
+        [InlineKeyboardButton("iOS", callback_data="hlp_ios")],
         [InlineKeyboardButton("Windows", callback_data="hlp_windows")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")],
     ])
@@ -464,7 +463,7 @@ async def handle_agent_request(update: Update, context: ContextTypes.DEFAULT_TYP
 
     agent_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]])
     await update.message.reply_text(
-        "لطفا در قالب یک پیام درخواست و نکات قابل ملاحظه درباره خود را ارسال کرده و سپس تا تماس از طرف ادمین منتظر بمانید",
+        "لطفا در قالب یک پیام درخواست و نکات قابل ملاحظه درباره خود را ارسال کرده و سپس تا تماس از طرف ادمین منتظر بمانید\n\nبه منوی اصلی بازگشتید!",
         reply_markup=agent_markup)
 
 
@@ -673,13 +672,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("hlp_"):
         app_key = data[4:]
         help_texts = {
-            "v2rayng": "📱 **آموزش استفاده از V2rayNG (اندروید):**\n\n1. اپلیکیشن V2rayNG را دانلود و نصب کنید.\n2. لینک اشتراک خود را از ربات کپی کنید.\n3. وارد برنامه شده، روی دکمه + یا گوشه بالا بزنید و گزینه Import config from clipboard را انتخاب کنید.\n4. روی دکمه اتصال در پایین صفحه بزنید.",
-            "streisand": "🍎 **آموزش استفاده از Streisand (آیفون):**\n\n1. اپلیکیشن Streisand را از اپ‌استور دانلود کنید.\n2. لینک اشتراک را کپی کرده و داخل برنامه وارد نمایید.",
-            "happ": "📱 **آموزش استفاده از Happ:**\n\n1. برنامه را نصب و باز کنید.\n2. لینک اشتراک را ایمپورت کنید.",
-            "v2raytun": "🚀 **آموزش استفاده از V2rayTun:**\n\n1. اپلیکیشن را باز کرده و لینک اشتراک را اضافه کنید.",
-            "android": "🤖 **راهنمای اندروید:** استفاده از V2rayNG بهترین گزینه است.",
-            "ios": "🍏 **راهنمای آیفون:** استفاده از Streisand یا Foxray.",
-            "windows": "💻 **راهنمای ویندوز:** استفاده از نرم‌افزار v2rayN."
+            "android": "📱 **آموزش استفاده از V2rayNG (اندروید):**\n\n1. اپلیکیشن V2rayNG را دانلود و نصب کنید.\n2. لینک اشتراک خود را از ربات کپی کنید.\n3. وارد برنامه شده، روی دکمه + بزنید و گزینه Import config from clipboard را انتخاب کنید.\n4. روی دکمه اتصال بزنید.",
+            "ios": "🍏 **آموزش استفاده از Happ و Streisand (آیفون):**\n\n1. برنامه Streisand یا Happ را از اپ‌استور دانلود کنید.\n2. لینک اشتراک را کپی کرده و داخل برنامه وارد نمایید.",
+            "windows": "💻 **آموزش استفاده از v2rayN (ویندوز):**\n\n1. نرم‌افزار را دانلود کنید.\n2. لینک اشتراک را در برنامه ایمپورت کرده و متصل شوید."
         }
         text = help_texts.get(app_key, "آموزش یافت نشد.")
         back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به آموزش‌ها", callback_data="back_to_help")]])
