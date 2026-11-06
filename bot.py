@@ -139,7 +139,7 @@ def confirm_menu(dk, vk):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎁 اعمال کد تخفیف", callback_data="apply_discount")],
         [InlineKeyboardButton("💳 پرداخت ریالی", callback_data=f"pay_{dk}_{vk}")],
-        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")],
+        [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="menu")],
     ])
 
 
@@ -152,11 +152,11 @@ def help_menu():
     ])
 
 
-def admin_decision_keyboard(user_id, dk, vk):
+def admin_decision_keyboard(user_id, dk, vk, username):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ تایید", callback_data=f"approve_{user_id}_{dk}_{vk}"),
-            InlineKeyboardButton("❌ رد", callback_data=f"reject_{user_id}_{dk}_{vk}"),
+            InlineKeyboardButton("✅ تایید", callback_data=f"approve_{user_id}_{dk}_{vk}_{username}"),
+            InlineKeyboardButton("❌ رد", callback_data=f"reject_{user_id}_{dk}_{vk}_{username}"),
         ]
     ])
 
@@ -166,13 +166,13 @@ def order_text(dk, vk, username, factor_id):
     gb, prices = VOLUMES[vk]
     price = prices[dk]
     return (
-        f"📋 پیش فاکتور شماره {factor_id}\n\n"
+        f"پیش فاکتور شماره {factor_id}\n\n"
         f"👤 نام کاربری: `{username}`\n"
         f"🌐 سرور: SpeedUR\n"
         f"📦 دسته محصول: {title}\n"
         f"🏷 نوع سرویس: {gb} گیگ | {days} روزه\n"
         f"📅 مدت اعتبار: {days} روز\n"
-        f"🗄 حجم بسته: {gb} گیگابایت\n\n"
+        f"📦 حجم بسته: {gb} گیگابایت\n\n"
         f"💳 مبلغ قابل پرداخت: {fmt(price)} تومان\n\n"
         f"سفارش شما آماده پرداخت است"
     )
@@ -360,14 +360,14 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         text_msg = (
-            f"💳 لطفاً مبلغ {fmt(amount)} تومان (و معادل ریالی آن) را به کارت زیر واریز نمایید:\n\n"
+            f"لطفاً مبلغ {fmt(amount)} تومان ({fmt(amount * 10)} ریال) به کارت زیر واریز نمایید.\n\n"
             f"====================\n"
             f"`{CARD_NUMBER}`\n"
             f"{CARD_OWNER}\n"
             f"====================\n\n"
             f"📷 عکس رسید خود را در این مرحله ارسال نمایید.\n\n"
             f"⚠️ از اپلیکیشن آپ و تاپ با توجه به محدودیت روزانه برای انتقال استفاده نکنید.\n"
-            f"⚠️ مبلغ را دقیق واریز کنید و از رند کردن آن خودداری فرمایید.\n"
+            f"⚠️ مبلغ را دقیق واریز کنید؛ و از رند کردن آن خودداری فرمایید.\n"
             f"⚠️ مبلغی که کپی میکنید ریالی توجه کنید."
         )
         pay_markup = InlineKeyboardMarkup([
@@ -640,14 +640,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount = 50000
 
         text = (
-            f"💳 لطفاً مبلغ {fmt(amount)} تومان (و معادل ریالی آن) را به کارت زیر واریز نمایید:\n\n"
+            f"لطفاً مبلغ {fmt(amount)} تومان ({fmt(amount * 10)} ریال) به کارت زیر واریز نمایید.\n\n"
             f"====================\n"
             f"`{CARD_NUMBER}`\n"
             f"{CARD_OWNER}\n"
             f"====================\n\n"
             f"📷 عکس رسید خود را در این مرحله ارسال نمایید.\n\n"
             f"⚠️ از اپلیکیشن آپ و تاپ با توجه به محدودیت روزانه برای انتقال استفاده نکنید.\n"
-            f"⚠️ مبلغ را دقیق واریز کنید و از رند کردن آن خودداری فرمایید.\n"
+            f"⚠️ مبلغ را دقیق واریز کنید؛ و از رند کردن آن خودداری فرمایید.\n"
             f"⚠️ مبلغی که کپی میکنید ریالی توجه کنید."
         )
         pay_markup = InlineKeyboardMarkup([
@@ -678,7 +678,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "apply_discount":
-        await query.answer("کد تخفیف معتبری یافت نشد.", show_alert=True)
+        await query.answer("❌ کد هدیه یافت نشد.", show_alert=True)
         return
 
     if data.startswith("serv_"):
@@ -876,23 +876,20 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gb, prices = VOLUMES[vk]
         price = prices[dk]
         text = (
-            f"🛒 نام کاربری: `{order.get('username', 'user')}`\n"
-            f"🌐 سرور: SpeedUR\n"
-            f"📦 نوع سرویس: {gb} گیگ | {days} روزه\n\n"
-            f"لطفا مبلغ {fmt(price)} تومان (و معادل ریالی آن) را به کارت زیر واریز نمایید:\n\n"
+            f"لطفاً مبلغ {fmt(price)} تومان ({fmt(price * 10)} ریال) به کارت زیر واریز نمایید.\n\n"
             f"====================\n"
             f"`{CARD_NUMBER}`\n"
             f"{CARD_OWNER}\n"
             f"====================\n\n"
             f"📷 عکس رسید خود را در این مرحله ارسال نمایید.\n\n"
             f"⚠️ از اپلیکیشن آپ و تاپ با توجه به محدودیت روزانه برای انتقال استفاده نکنید.\n"
-            f"⚠️ مبلغ را دقیق واریز کنید و از رند کردن آن خودداری فرمایید.\n"
+            f"⚠️ مبلغ را دقیق واریز کنید؛ و از رند کردن آن خودداری فرمایید.\n"
             f"⚠️ مبلغی که کپی میکنید ریالی توجه کنید."
         )
         pay_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("📋 کپی مبلغ", callback_data=f"copy_amt_{price}"), InlineKeyboardButton("📋 کپی شماره کارت", callback_data="copy_card")],
             [InlineKeyboardButton("📤 ارسال رسید پرداخت", callback_data="send_receipt_hint")],
-            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]
+            [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="menu")]
         ])
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=pay_markup)
         return
@@ -920,7 +917,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   f"💰 مبلغ شارژ: {fmt(credit_order)} تومان")
         context.user_data.pop("credit_order", None)
         await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo, caption=caption)
-        await update.message.reply_text("✅ رسید شارژ حساب شما برای بررسی ارسال شد. لطفاً منتظر تایید بمانید.")
+        await update.message.reply_text("✅ رسید پرداخت شما دریافت شد. پس از بررسی توسط ادمین به درخواست شما رسیدگی می گردد. لطفا از ارسال مجدد رسید خودداری نمایید.")
         return
 
     dk, vk = order["dk"], order["vk"]
@@ -941,10 +938,10 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=ADMIN_ID,
         photo=photo,
         caption=caption,
-        reply_markup=admin_decision_keyboard(user_id, dk, vk))
+        reply_markup=admin_decision_keyboard(user_id, dk, vk, username))
 
     context.user_data.pop("order", None)
-    await update.message.reply_text("✅ رسید شما برای بررسی ارسال شد. لطفاً منتظر تایید بمانید.")
+    await update.message.reply_text("✅ رسید پرداخت شما دریافت شد. پس از بررسی توسط ادمین به درخواست شما رسیدگی می گردد. لطفا از ارسال مجدد رسید خودداری نمایید.")
 
 
 async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
@@ -953,8 +950,13 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("فقط ادمین می‌تونه این کارو بکنه.", show_alert=True)
         return
 
-    action, user_id_str, dk, vk = data.split("_", 3)
-    user_id = int(user_id_str)
+    parts = data.split("_", 4)
+    action = parts[0]
+    user_id = int(parts[1])
+    dk = parts[2]
+    vk = parts[3]
+    username = parts[4] if len(parts) > 4 else f"user_{user_id}"
+
     title, days = DURATIONS[dk]
     gb, prices = VOLUMES[vk]
 
@@ -965,7 +967,6 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     await query.edit_message_caption(caption=query.message.caption + "\n\n⏳ در حال ساخت کاربر در پنل...")
-    username = f"user_{user_id}_{int(datetime.now().timestamp())}"
     success, result = await panel_create_user(username, gb=gb, days=days)
 
     if success:
@@ -973,13 +974,22 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_caption(caption=query.message.caption + "\n\n✅ تایید شد و کاربر ساخته شد.")
         
         caption_text = (
-            f"🎉 پرداخت شما تایید شد!\n\n"
-            f"⏳ مدت: {title}\n"
-            f"📦 حجم: {gb} گیگ\n\n"
-            f"🔗 **لینک اشتراک شما:**\n`{result}`"
+            f"🟢 اشتراک شما با موفقیت ساخته شد.\n"
+            f"👤 نام کاربری شما :\n`{username}`\n\n"
+            f"🌐 لینک اشتراک شما:\n\n"
+            f"`{result}`\n\n"
+            f"📲 برای کپی کردن لینک بالا فقط کافیست آدرس لینک را یک بار لمس کنید!"
         )
         qr_buf = generate_qr_buffer(result)
-        await context.bot.send_photo(chat_id=user_id, photo=InputFile(qr_buf, filename="sub_qr.png"), caption=caption_text, parse_mode="Markdown")
+        
+        service_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏳ زمان اشتراک", callback_data="none"), InlineKeyboardButton(f"{days} روز", callback_data="none")],
+            [InlineKeyboardButton("🌐 حجم سرویس", callback_data="none"), InlineKeyboardButton(f"{gb} گیگابایت", callback_data="none")],
+            [InlineKeyboardButton("📥 دریافت QR Code", callback_data=f"qr_{username}")],
+            [InlineKeyboardButton("📚 آموزش نصب", callback_data="hlp_android")]
+        ])
+        
+        await context.bot.send_photo(chat_id=user_id, photo=InputFile(qr_buf, filename="sub_qr.png"), caption=caption_text, parse_mode="Markdown", reply_markup=service_markup)
     else:
         await query.edit_message_caption(caption=query.message.caption + f"\n\n❌ خطا در ساخت کاربر:\n{result}")
         await context.bot.send_message(
