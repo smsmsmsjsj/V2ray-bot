@@ -17,7 +17,7 @@ import qrcode
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       ReplyKeyboardMarkup, InputFile, CopyTextButton)
 from telegram.constants import ParseMode
-from telegram.error import RetryAfter, NetworkError
+from telegram.error import RetryAfter, NetworkError, BadRequest
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           MessageHandler, PicklePersistence, filters, ContextTypes)
 
@@ -70,6 +70,7 @@ DURATIONS = {
 
 VOLUMES = {
     # TODO: قیمت 5 ماهه v10 با 3 ماهه یکسان است؛ چک کن اشتباه تایپی نباشد
+    # TODO: قیمت 5 ماهه v200 (1,000,000) نسبت به 3 ماهه جهش زیادی دارد؛ چک کن
     "v10":  (10,  {"d1": 50000,  "d2": 55000,  "d3": 65000,  "d5": 65000,   "d12": 70000}),
     "v20":  (20,  {"d1": 95000,  "d2": 110000, "d3": 125000, "d5": 145000,  "d12": 160000}),
     "v30":  (30,  {"d1": 120000, "d2": 135000, "d3": 150000, "d5": 170000,  "d12": 190000}),
@@ -127,6 +128,9 @@ HELP_TEXTS = {
     "windows": "💻 آموزش استفاده از v2rayN (ویندوز):\n\n1. نرم‌افزار را دانلود کنید.\n2. لینک اشتراک را در برنامه ایمپورت کرده و متصل شوید.",
 }
 
+STATUS_ICON = {"active": "🟢", "disabled": "🔴", "expired": "⚫️",
+               "limited": "🟠", "on_hold": "🟡"}
+
 USERNAME_RE = re.compile(r"^[a-z0-9_]{3,20}$")
 HTML = ParseMode.HTML
 
@@ -157,6 +161,9 @@ _LAST = {}
 def throttled(user_id, key, seconds) -> bool:
     """True یعنی خیلی زود تکرار شده."""
     now = time.time()
+    if len(_LAST) > 5000:  # جلوگیری از رشد بی‌نهایت حافظه
+        for k in [k for k, v in _LAST.items() if now - v > 3600]:
+            _LAST.pop(k, None)
     k = (user_id, key)
     if now - _LAST.get(k, 0) < seconds:
         return True
@@ -351,9 +358,39 @@ def attach_receipt(oid, uid, file_uid) -> bool:
         return cur.rowcount == 1
 
 
+def revert_receipt(oid):
+    """اگر ارسال رسید به ادمین شکست خورد، سفارش به حالت قبل برگردد و رسید آزاد شود."""
+    with conn() as c:
+        c.execute("UPDATE orders SET status='awaiting_receipt', receipt_uid=NULL "
+                  "WHERE id=? AND status='pending'", (oid,))
+
+
 def receipt_used_before(file_uid) -> bool:
     with conn() as c:
         return c.execute("SELECT 1 FROM orders WHERE receipt_uid=?", (file_uid,)).fetchone() is not None
+
+
+def cancel_awaiting(oid):
+    """سفارشِ منتظر رسید را لغو و کد تخفیفش را آزاد می‌کند."""
+    if not oid:
+        return
+    o = get_order(oid)
+    if o and claim_order(oid, "awaiting_receipt", "cancelled"):
+        release_discount(o["discount_code"])
+
+
+def expire_old_orders() -> int:
+    cutoff = time.time() - RECEIPT_TTL
+    with conn() as c:
+        ids = [r["id"] for r in c.execute(
+            "SELECT id FROM orders WHERE status='awaiting_receipt' AND created_at<?", (cutoff,))]
+    n = 0
+    for oid in ids:
+        o = get_order(oid)
+        if o and claim_order(oid, "awaiting_receipt", "expired"):
+            release_discount(o["discount_code"])
+            n += 1
+    return n
 
 
 # ---- دعوت ----
@@ -408,6 +445,14 @@ def redeem_gift(code, uid) -> int:
         return int(row["amount"])
 
 
+def redeem_gift_safe(code: str, uid: int) -> int:
+    try:
+        return redeem_gift(code.strip().upper(), uid)
+    except Exception as e:
+        logger.error(f"redeem_gift: {e}")
+        return 0
+
+
 # ============================== پنل ==============================
 HTTP: "httpx.AsyncClient | None" = None
 _GROUP_CACHE = {"ids": None}
@@ -439,6 +484,22 @@ def parse_expire(v):
         return None
 
 
+def quota_valid(info: dict) -> bool:
+    """آیا زمان و حجم سرویس هنوز باقی مانده؟"""
+    now = time.time()
+    expire = parse_expire(info.get("expire"))
+    limit = int(info.get("data_limit") or 0)
+    used = int(info.get("used_traffic") or 0)
+    return (not expire or expire > now) and (not limit or used < limit)
+
+
+def _fallback_groups():
+    try:
+        return [int(PANEL_GROUP_NAME)]
+    except ValueError:
+        return [1]
+
+
 async def get_group_ids():
     if _GROUP_CACHE["ids"] is not None:
         return _GROUP_CACHE["ids"]
@@ -451,13 +512,13 @@ async def get_group_ids():
                 if str(g.get("name", "")).lower() == str(PANEL_GROUP_NAME).lower():
                     _GROUP_CACHE["ids"] = [g["id"]]
                     return _GROUP_CACHE["ids"]
+        # پنل جواب داد ولی گروه پیدا نشد → نسخه جایگزین (کش می‌شود)
+        _GROUP_CACHE["ids"] = _fallback_groups()
+        return _GROUP_CACHE["ids"]
     except Exception as e:
+        # خطای موقت شبکه: کش نکن تا دفعه بعد دوباره تلاش شود
         logger.warning(f"خطا در گرفتن گروه‌ها: {e}")
-    try:
-        _GROUP_CACHE["ids"] = [int(PANEL_GROUP_NAME)]
-    except ValueError:
-        _GROUP_CACHE["ids"] = [1]
-    return _GROUP_CACHE["ids"]
+        return _fallback_groups()
 
 
 async def panel_get_user(username):
@@ -524,10 +585,9 @@ async def panel_renew(username: str, gb: float, days: int):
     now = time.time()
     expire = parse_expire(info.get("expire"))
     limit = int(info.get("data_limit") or 0)
-    used = int(info.get("used_traffic") or 0)
-    active = (info.get("status") == "active"
-              and (not expire or expire > now)
-              and (not limit or used < limit))
+    # سرویسِ متوقف‌شده (disabled) که هنوز زمان/حجم دارد هم «فعال» حساب می‌شود
+    # تا باقیمانده نسوزد (مطابق FAQ)
+    active = info.get("status") in ("active", "disabled", "on_hold") and quota_valid(info)
     add_bytes = int(gb * 1024 ** 3)
     try:
         if active:
@@ -664,9 +724,15 @@ def support_kb():
     ])
 
 
-def services_kb(uid, prefix):
-    rows = [[InlineKeyboardButton(f"🟢 {s['username']}", callback_data=f"{prefix}{s['username']}")]
-            for s in user_services(uid)]
+async def services_kb(uid, prefix):
+    """لیست سرویس‌ها با وضعیت واقعی (زنده از پنل)."""
+    svcs = user_services(uid)
+    infos = await asyncio.gather(*(panel_get_user(s["username"]) for s in svcs))
+    rows = []
+    for s, info in zip(svcs, infos):
+        icon = "⚪️" if info is None else STATUS_ICON.get(info.get("status", ""), "⚪️")
+        rows.append([InlineKeyboardButton(f"{icon} {s['username']}",
+                                          callback_data=f"{prefix}{s['username']}")])
     rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")])
     return InlineKeyboardMarkup(rows)
 
@@ -735,12 +801,12 @@ def gb_fmt(b) -> str:
 
 def service_view(svc, info):
     uname = svc["username"]
+    st = None
     if info is None:
-        status_line, active, usage = "⚪️ وضعیت: نامشخص (پنل در دسترس نیست)", True, ""
+        status_line, usage = "⚪️ وضعیت: نامشخص (پنل در دسترس نیست)", ""
     else:
         st = info.get("status", "")
-        active = st == "active"
-        names = {"active": "🟢 فعال", "disabled": "🔴 غیرفعال", "expired": "🔴 منقضی",
+        names = {"active": "🟢 فعال", "disabled": "🔴 غیرفعال", "expired": "⚫️ منقضی",
                  "limited": "🟠 اتمام حجم", "on_hold": "🟡 در انتظار"}
         status_line = f"وضعیت: {names.get(st, st)}"
         used = int(info.get("used_traffic") or 0)
@@ -758,11 +824,16 @@ def service_view(svc, info):
         f"📦 نوع اشتراک: {esc(svc['title'])}{usage}\n\n"
         f"🔗 لینک اشتراک:\n<code>{esc(svc['link'])}</code>"
     )
-    toggle = (InlineKeyboardButton("⏹ توقف سرویس", callback_data=f"stop_{uname}") if active
-              else InlineKeyboardButton("▶️ فعالسازی سرویس", callback_data=f"active_{uname}"))
+    # دکمه توقف/فعالسازی فقط برای وضعیت active و disabled
+    second_row = []
+    if st == "active":
+        second_row.append(InlineKeyboardButton("⏹ توقف سرویس", callback_data=f"stop_{uname}"))
+    elif st == "disabled":
+        second_row.append(InlineKeyboardButton("▶️ فعالسازی سرویس", callback_data=f"active_{uname}"))
+    second_row.append(InlineKeyboardButton("♻️ تمدید سرویس", callback_data=f"rn_{uname}"))
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 دریافت QR Code", callback_data=f"qr_{uname}")],
-        [toggle, InlineKeyboardButton("♻️ تمدید سرویس", callback_data=f"rn_{uname}")],
+        second_row,
         [InlineKeyboardButton("❌ حذف لینک فعلی و دریافت لینک جدید", callback_data=f"reset_confirm_{uname}")],
         [InlineKeyboardButton("🔙 بازگشت به لیست سرویس ها", callback_data="back_to_services")],
     ])
@@ -788,6 +859,8 @@ async def send_service_to_user(bot, user_id, username, link, days, gb, renewed=F
 
 
 def clear_flow(context):
+    # اگر سفارش منتظر رسید رها شد، لغو و کد تخفیفش آزاد شود
+    cancel_awaiting(context.user_data.get("order_id"))
     for k in ("state", "order", "order_id"):
         context.user_data.pop(k, None)
 
@@ -950,6 +1023,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ مبلغ نامعتبر است (حداقل 10,000 و حداکثر 50,000,000 تومان)",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="add_credit")]]))
             return
+        cancel_awaiting(context.user_data.get("order_id"))
         oid = create_order(user_id, "credit", amount)
         context.user_data["order_id"] = oid
         await update.message.reply_text(pay_text(amount), parse_mode=HTML, reply_markup=pay_markup(amount))
@@ -959,9 +1033,6 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("state", None)
         if throttled(user_id, "gift", 3):
             return
-        amount = redeem_gift(text.upper())
-        amount = amount if False else redeem_gift(text.upper(), user_id) if False else 0
-        # (خط بالا حذف شود؛ نسخه صحیح در پایین)
         amount = redeem_gift_safe(text, user_id)
         if amount:
             await update.message.reply_text(
@@ -974,7 +1045,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == "waiting_discount":
         context.user_data.pop("state", None)
         order = context.user_data.get("order")
-        if not order or "dk" not in order or "username" not in order:
+        if not valid_order(order):
             await update.message.reply_text("نشست منقضی شد. دوباره از منو شروع کن.", reply_markup=main_keyboard())
             return
         if throttled(user_id, "discount", 3):
@@ -1034,7 +1105,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("شما هنوز سرویسی ندارید.", reply_markup=main_keyboard())
             return
         await update.message.reply_text("♻️ سرویسی که می‌خواهید تمدید شود را انتخاب کنید:",
-                                        reply_markup=services_kb(user_id, "rn_"))
+                                        reply_markup=await services_kb(user_id, "rn_"))
         return
 
     if text == BTN_TEST:
@@ -1048,7 +1119,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=main_keyboard())
             return
         await update.message.reply_text("🔹 برای مشاهده اطلاعات روی محصول کلیک کنید:",
-                                        reply_markup=services_kb(user_id, "serv_"))
+                                        reply_markup=await services_kb(user_id, "serv_"))
         return
 
     if text == BTN_CREDIT:
@@ -1092,14 +1163,6 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("یکی از گزینه‌های منو رو انتخاب کن 👇", reply_markup=main_keyboard())
-
-
-def redeem_gift_safe(code: str, uid: int) -> int:
-    try:
-        return redeem_gift(code.strip().upper(), uid)
-    except Exception as e:
-        logger.error(f"redeem_gift: {e}")
-        return 0
 
 
 async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1194,6 +1257,21 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not svc:
             await ack(q, "سرویس پیدا نشد!", True)
             return
+        info = await panel_get_user(svc["username"])
+        if info is None:
+            await ack(q, "❌ پنل در دسترس نیست. بعداً تلاش کنید.", True)
+            return
+        st = info.get("status")
+        if make_active:
+            if st != "disabled":
+                await ack(q, "فقط سرویسِ متوقف‌شده قابل فعالسازی است.", True)
+                return
+            if not quota_valid(info):
+                await ack(q, "زمان یا حجم این سرویس تمام شده؛ لطفاً آن را تمدید کنید.", True)
+                return
+        elif st != "active":
+            await ack(q, "این سرویس فعال نیست.", True)
+            return
         if await panel_change_status(svc["username"], "active" if make_active else "disabled"):
             text, markup = service_view(svc, await panel_get_user(svc["username"]))
             await q.edit_message_text(text, parse_mode=HTML, reply_markup=markup)
@@ -1232,6 +1310,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ack(q, "سرویس پیدا نشد!", True)
             return
         await ack(q)
+        cancel_awaiting(context.user_data.get("order_id"))
+        context.user_data.pop("order_id", None)
         context.user_data["order"] = {"kind": "renew", "username": svc["username"]}
         context.user_data.pop("state", None)
         await q.edit_message_text(f"♻️ تمدید سرویس <code>{esc(svc['username'])}</code>\n\n⏳ انتخاب مدت زمان:",
@@ -1247,6 +1327,26 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ack(q)
             return
         amount = final_price(order)
+
+        # کلیک تکراری روی کارت‌به‌کارت: همان سفارش قبلی دوباره نشان داده شود (کد تخفیف دوباره مصرف نشود)
+        if data == "paycard" and order.get("oid"):
+            prev = get_order(order["oid"])
+            if (prev and prev["user_id"] == user_id and prev["status"] == "awaiting_receipt"
+                    and prev["amount"] == amount):
+                await ack(q)
+                context.user_data["order_id"] = prev["id"]
+                await q.edit_message_text(pay_text(amount), parse_mode=HTML, reply_markup=pay_markup(amount))
+                return
+
+        if order["kind"] == "new" and (username_taken_local(order["username"])
+                                       or await panel_user_exists(order["username"]) is True):
+            await ack(q, "این نام کاربری در این فاصله گرفته شد. دوباره از منو شروع کن.", True)
+            return
+
+        # سفارش منتظر رسیدِ قبلی (اگر هست) لغو شود
+        cancel_awaiting(context.user_data.get("order_id"))
+        context.user_data.pop("order_id", None)
+
         code = order.get("discount_code")
         if code and not consume_discount(code):
             order.pop("discount_code", None)
@@ -1259,6 +1359,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ack(q)
             oid = create_order(user_id, order["kind"], amount, order["dk"], order["vk"],
                                order["username"], code, "card", "awaiting_receipt")
+            order["oid"] = oid
+            context.user_data["order"] = order
             context.user_data["order_id"] = oid
             await q.edit_message_text(pay_text(amount), parse_mode=HTML, reply_markup=pay_markup(amount))
             return
@@ -1268,9 +1370,16 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             release_discount(code)
             await ack(q, f"موجودی کافی نیست.\nموجودی شما: {fmt(get_balance(user_id))} تومان", True)
             return
+        try:
+            oid = create_order(user_id, order["kind"], amount, order["dk"], order["vk"],
+                               order["username"], code, "wallet", "processing")
+        except Exception:
+            logger.exception("create_order wallet")
+            add_balance(user_id, amount)  # بازگشت پول
+            release_discount(code)
+            await ack(q, "❌ خطای داخلی؛ مبلغ برگشت داده شد. دوباره تلاش کنید.", True)
+            return
         await ack(q, "⏳ در حال انجام...")
-        oid = create_order(user_id, order["kind"], amount, order["dk"], order["vk"],
-                           order["username"], code, "wallet", "processing")
         try:
             ok, err = await fulfill_order(context.bot, oid)
         except Exception as e:
@@ -1343,6 +1452,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if amount < 10000 or amount > 50_000_000:
             return
+        cancel_awaiting(context.user_data.get("order_id"))
         oid = create_order(user_id, "credit", amount)
         context.user_data["order_id"] = oid
         await q.edit_message_text(pay_text(amount), parse_mode=HTML, reply_markup=pay_markup(amount))
@@ -1375,7 +1485,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "back_to_services":
         await q.edit_message_text("🔹 برای مشاهده اطلاعات روی محصول کلیک کنید:",
-                                  reply_markup=services_kb(user_id, "serv_"))
+                                  reply_markup=await services_kb(user_id, "serv_"))
         return
 
     if data.startswith("qr_"):
@@ -1424,6 +1534,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order.update({"dk": dk, "vk": vk})
         order.pop("discount_code", None)
         order.pop("discount_percent", None)
+        order.pop("oid", None)
         context.user_data["order"] = order
         if order["kind"] == "renew" and order.get("username"):
             await show_order_confirm(q, order)
@@ -1456,19 +1567,22 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=main_keyboard())
         return
 
-    photo = update.message.photo[-1]
-    if receipt_used_before(photo.file_unique_id):
-        await update.message.reply_text("❌ این رسید قبلاً ارسال شده است.", reply_markup=main_keyboard())
+    msg = update.message
+    is_photo = bool(msg.photo)
+    f = msg.photo[-1] if is_photo else msg.document
+    if receipt_used_before(f.file_unique_id):
+        await msg.reply_text("❌ این رسید قبلاً ارسال شده است.", reply_markup=main_keyboard())
         return
-    if not attach_receipt(oid, user.id, photo.file_unique_id):
-        await update.message.reply_text("این سفارش قبلاً ثبت شده است.", reply_markup=main_keyboard())
+    if not attach_receipt(oid, user.id, f.file_unique_id):
+        await msg.reply_text("این سفارش قبلاً ثبت شده است.", reply_markup=main_keyboard())
         clear_flow(context)
         return
 
     kind_map = {"credit": "شارژ کیف پول", "new": "خرید سرویس جدید", "renew": "تمدید سرویس"}
+    uname_txt = f"@{user.username}" if user.username else "بدون یوزرنیم"
     caption = (f"🧾 رسید جدید | سفارش #{oid}\n\n"
                f"📌 نوع: {kind_map.get(o['kind'], o['kind'])}\n"
-               f"👤 کاربر: {user.full_name} (@{user.username})\n🆔 آیدی: {user.id}\n")
+               f"👤 کاربر: {user.full_name} ({uname_txt})\n🆔 آیدی: {user.id}\n")
     if o["kind"] != "credit":
         title, _ = DURATIONS[o["dk"]]
         caption += (f"👤 نام کاربری: {o['username']}\n⏳ مدت: {title}\n"
@@ -1478,16 +1592,20 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption += f"💰 مبلغ: {fmt(o['amount'])} تومان"
 
     try:
-        await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo.file_id, caption=caption,
-                                     reply_markup=admin_keyboard(oid))
+        if is_photo:
+            await context.bot.send_photo(chat_id=ADMIN_ID, photo=f.file_id, caption=caption,
+                                         reply_markup=admin_keyboard(oid))
+        else:
+            await context.bot.send_document(chat_id=ADMIN_ID, document=f.file_id, caption=caption,
+                                             reply_markup=admin_keyboard(oid))
     except Exception as e:
         logger.error(f"ارسال رسید به ادمین ناموفق: {e}")
-        claim_order(oid, "pending", "awaiting_receipt")  # دوباره قابل ارسال
-        await update.message.reply_text("❌ ارسال رسید به مدیریت ناموفق بود. چند دقیقه بعد دوباره تلاش کنید.")
+        revert_receipt(oid)  # وضعیت + رسید آزاد شود تا کاربر بتواند دوباره بفرستد
+        await msg.reply_text("❌ ارسال رسید به مدیریت ناموفق بود. چند دقیقه بعد دوباره تلاش کنید.")
         return
 
     clear_flow(context)
-    await update.message.reply_text(
+    await msg.reply_text(
         "✅ رسید پرداخت شما دریافت شد. پس از بررسی توسط ادمین به درخواست شما رسیدگی می گردد. "
         "لطفا از ارسال مجدد رسید خودداری نمایید.", reply_markup=main_keyboard())
 
@@ -1606,6 +1724,18 @@ async def backup_loop(app):
             logger.error(f"بکاپ ناموفق: {e}")
 
 
+async def expire_loop():
+    """هر نیم ساعت سفارش‌های منتظر رسیدِ منقضی را بسته و کد تخفیفشان را آزاد می‌کند."""
+    while True:
+        await asyncio.sleep(1800)
+        try:
+            n = await asyncio.to_thread(expire_old_orders)
+            if n:
+                logger.info(f"{n} سفارش منقضی شد")
+        except Exception as e:
+            logger.error(f"expire_loop: {e}")
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -1631,6 +1761,8 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     logger.error("خطا:", exc_info=err)
     if isinstance(err, NetworkError):
         return
+    if isinstance(err, BadRequest) and "not modified" in str(err).lower():
+        return  # ویرایش پیام با متن یکسان؛ خطای واقعی نیست
     if not throttled(0, "err_notify", 60):
         await notify_admin(context.bot, f"⚠️ خطای ربات: {type(err).__name__}: {err}")
     if isinstance(update, Update) and update.effective_chat:
@@ -1642,6 +1774,7 @@ async def post_init(app: Application):
     global HTTP
     HTTP = httpx.AsyncClient()
     app.bot_data["backup_task"] = asyncio.create_task(backup_loop(app))
+    app.bot_data["expire_task"] = asyncio.create_task(expire_loop())
 
 
 async def post_shutdown(app: Application):
@@ -1670,7 +1803,7 @@ def main():
     app.add_handler(CommandHandler("addgift", cmd_addgift, filters=admin_only))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast, filters=admin_only))
     app.add_handler(CallbackQueryHandler(callback_router))
-    app.add_handler(MessageHandler(filters.PHOTO, receipt_handler))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, receipt_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_error_handler(on_error)
 
