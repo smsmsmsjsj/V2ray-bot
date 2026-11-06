@@ -360,12 +360,15 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(parts) >= 2 and parts[0] == str(user_id):
                 join_date = parts[1]
 
+        now_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+
         credit_text = (
             f"👤 **اطلاعات حساب کاربری شما:**\n\n"
             f"💰 موجودی: 0 تومان\n"
             f"🆔 آیدی عددی: `{user_id}`\n"
             f"📦 تعداد سرویس‌ها: {len(my_services)}\n"
-            f"📅 تاریخ ورود به بات: {join_date}"
+            f"📅 تاریخ ورود به بات: {join_date}\n\n"
+            f"🕒 {now_str}"
         )
         credit_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("💳 افزایش موجودی", callback_data="add_credit")],
@@ -514,17 +517,34 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "faq":
         faq_text = (
             "❓ **سوالات متداول:**\n\n"
-            "۱. چطور سرویس بخرم؟ از منوی اصلی روی خرید سرویس جدید بزنید.\n"
-            "۲. چطور تمدید کنم؟ از منوی سرویس‌های من یا دکمه تمدید اقدام کنید.\n"
-            "۳. حجم و زمان چطور محاسبه میشه؟ از لحظه خرید شروع میشه."
+            "1️⃣ **فیلترشکن شما آیپی ثابته؟ میتونم برای صرافی های ارز دیجیتال استفاده کنم؟**\n"
+            "✅ به دلیل وضعیت نت و محدودیت های کشور سرویس ما مناسب ترید نیست و فقط لوکیشن‌ ثابته.\n\n"
+            "2️⃣ **اگه قبل از منقضی شدن اکانت، تمدید کنم روزها و حجم باقی مانده می سوزد؟**\n"
+            "✅ خیر، بسته تمدید شده برای شما رزرو می گردد و به محض پایان حجم یا زمان باقیمانده جایگزین می گردد.\n\n"
+            "3️⃣ **سرویسها چند کاربره هستند؟**\n"
+            "✅ تمامی سرویسهای ما سه کاربره هستند و در صورت سوء استفاده و پخش شدن لینک توسط سیستم تشخیص داده شده و مسدود میگردد.\n\n"
+            "4️⃣ **فیلترشکن شما از چه نوعی هست؟**\n"
+            "✅ فیلترشکن های ما v2ray است و پروتکل‌های مختلفی را ساپورت میکنیم تا با سخت تر شدن حلقه فیلترینگ بتوانیم بهترین سرویس ممکن را ارائه دهیم.\n\n"
+            "5️⃣ **چطور باید از این فیلترشکن استفاده کنم؟**\n"
+            "✅ برای آموزش نصب و استفاده از برنامه، روی دکمه «📚 آموزش» بات بزنید.\n\n"
+            "6️⃣ **فیلترشکن وصل نمیشه، چیکار کنم؟**\n"
+            "✅ ابتدا سرویس خود را بروزرسانی کنید تا آخرین سرورها را دریافت نمایید. در صورتی که با همه سرورها تست کردید و همه قطع بودند با پشتیبانی تماس بگیرید.\n\n"
+            "7️⃣ **فیلترشکن شما تضمینی هست که همیشه مواقع متصل بشه؟**\n"
+            "✅ به دلیل تغییرات روزانه وضعیت اینترنت کشور، امکان دادن تضمین نیست. ولی ما تمام تلاشمان را برای ارائه جدیدترین روشهای دور زدن فیلترینگ انجام می دهیم.\n\n"
+            "8️⃣ **امکان بازگشت وجه دارید؟**\n"
+            "✅ امکان بازگشت وجه در صورت حل نشدن مشکل از سمت ما وجود دارد.\n\n"
+            "📬 در صورتی که نتوانستید پاسخ سوالات و مشکلات خود را در بخش بالا پیدا کنید، جهت ارتباط بیشتر می توانید با دکمه زیر به پشتیبانی پیام بدید."
         )
-        faq_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پشتیبانی", callback_data="back_to_support")]])
+        faq_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 ارسال پیام به پشتیبانی", url=f"https://t.me/{SUPPORT.lstrip('@-')}")],
+            [InlineKeyboardButton("🔙 بازگشت به پشتیبانی", callback_data="back_to_support")]
+        ])
         await query.edit_message_text(faq_text, parse_mode="Markdown", reply_markup=faq_markup)
         return
 
     if data == "back_to_support":
         support_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 ارسال پیام به پشتیبانی", url=f"https://t.me/{SUPPORT.lstrip('@')}")],
+            [InlineKeyboardButton("💬 ارسال پیام به پشتیبانی", url=f"https://t.me/{SUPPORT.lstrip('@-')}")],
             [InlineKeyboardButton("❓ سوالات متداول", callback_data="faq")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]
         ])
@@ -592,7 +612,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "gift_code":
-        await query.message.reply_text("🎁 کد هدیه خود را وارد کنید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu")]]))
+        await query.answer("❌ کد هدیه یافت نشد.", show_alert=True)
         return
 
     if data.startswith("serv_"):
