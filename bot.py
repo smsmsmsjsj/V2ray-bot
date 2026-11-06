@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("BOT_TOKEN", "")
 SUPPORT = os.environ.get("SUPPORT_USERNAME", "@Dudgeuvsuvduv")
 
-CARD_NUMBER = os.environ.get("CARD_NUMBER", "6104331178136710")
+CARD_NUMBER = os.environ.get("CARD_NUMBER", "6219861016641267")
 CARD_OWNER = os.environ.get("CARD_OWNER", "مهدی هدایت زاده")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "5821799233"))
 
@@ -137,8 +137,9 @@ def volume_menu(dk):
 
 def confirm_menu(dk, vk):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ تایید و پرداخت", callback_data=f"pay_{dk}_{vk}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"dur_{dk}")],
+        [InlineKeyboardButton("🎁 اعمال کد تخفیف", callback_data="apply_discount")],
+        [InlineKeyboardButton("💳 پرداخت ریالی", callback_data=f"pay_{dk}_{vk}")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")],
     ])
 
 
@@ -160,12 +161,21 @@ def admin_decision_keyboard(user_id, dk, vk):
     ])
 
 
-def order_text(dk, vk):
+def order_text(dk, vk, username, factor_id):
     title, days = DURATIONS[dk]
     gb, prices = VOLUMES[vk]
-    return (f"⏳ مدت: {title} ({days} روز)\n"
-            f"📦 حجم: {gb} گیگ (کل مدت)\n"
-            f"💰 قیمت: {fmt(prices[dk])} تومان")
+    price = prices[dk]
+    return (
+        f"📋 پیش فاکتور شماره {factor_id}\n\n"
+        f"👤 نام کاربری: `{username}`\n"
+        f"🌐 سرور: SpeedUR\n"
+        f"📦 دسته محصول: {title}\n"
+        f"🏷 نوع سرویس: {gb} گیگ | {days} روزه\n"
+        f"📅 مدت اعتبار: {days} روز\n"
+        f"🗄 حجم بسته: {gb} گیگابایت\n\n"
+        f"💳 مبلغ قابل پرداخت: {fmt(price)} تومان\n\n"
+        f"سفارش شما آماده پرداخت است"
+    )
 
 
 # ============== بررسی عضویت کانال ==============
@@ -294,6 +304,7 @@ async def get_group_ids():
 # ============== هندلرها ==============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("order", None)
+    context.user_data.pop("state", None)
     user_id = update.effective_user.id
 
     users_data = load_lines(USERS_JOIN_FILE)
@@ -336,6 +347,70 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
+    state = context.user_data.get("state")
+
+    if state == "waiting_custom_credit":
+        context.user_data.pop("state", None)
+        try:
+            amount = int(text.replace(",", "").strip())
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ مبلغ نامعتبر است", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="add_credit")]]))
+            return
+
+        text_msg = (
+            f"💳 لطفاً مبلغ {fmt(amount)} تومان (و معادل ریالی آن) را به کارت زیر واریز نمایید:\n\n"
+            f"====================\n"
+            f"`{CARD_NUMBER}`\n"
+            f"{CARD_OWNER}\n"
+            f"====================\n\n"
+            f"📷 عکس رسید خود را در این مرحله ارسال نمایید.\n\n"
+            f"⚠️ از اپلیکیشن آپ و تاپ با توجه به محدودیت روزانه برای انتقال استفاده نکنید.\n"
+            f"⚠️ مبلغ را دقیق واریز کنید و از رند کردن آن خودداری فرمایید.\n"
+            f"⚠️ مبلغی که کپی میکنید ریالی توجه کنید."
+        )
+        pay_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 کپی مبلغ", callback_data=f"copy_amt_{amount}"), InlineKeyboardButton("📋 کپی شماره کارت", callback_data="copy_card")],
+            [InlineKeyboardButton("📤 ارسال رسید پرداخت", callback_data="send_receipt_hint")],
+            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]
+        ])
+        context.user_data["credit_order"] = amount
+        await update.message.reply_text(text_msg, parse_mode="Markdown", reply_markup=pay_markup)
+        return
+
+    if state == "waiting_gift_code":
+        context.user_data.pop("state", None)
+        await update.message.reply_text("❌ کد هدیه یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]]))
+        return
+
+    if state == "waiting_agent_msg":
+        context.user_data.pop("state", None)
+        full_name = update.effective_user.full_name
+        uname = update.effective_user.username or "ندارد"
+        
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"🤝 درخواست نمایندگی جدید\n\n👤 نام: {full_name}\n🆔 یوزرنیم: @{uname}\n🔢 آیدی: {user_id}\n\n💬 متن پیام:\n{text}"
+        )
+        await update.message.reply_text("🚀 پیام شما ارسال شد منتظر پاسخ مدیریت باشید.", reply_markup=main_keyboard())
+        return
+
+    if state == "waiting_username":
+        username = text.strip()
+        if len(username) > 20 or not username.replace("_", "").isalnum():
+            await update.message.reply_text("❌ نام کاربری نامعتبر است. لطفاً نام کاربری با حروف لاتین و حداکثر 20 کاراکتر وارد نمایید:")
+            return
+        
+        context.user_data.pop("state", None)
+        order = context.user_data.get("order")
+        order["username"] = username
+        dk, vk = order["dk"], order["vk"]
+        factor_id = int(datetime.now().timestamp()) % 1000000
+
+        msg = order_text(dk, vk, username, factor_id)
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=confirm_menu(dk, vk))
+        return
 
     if text in (BTN_NEW, BTN_RENEW):
         await update.message.reply_text("⏳ انتخاب مدت زمان:", reply_markup=duration_menu())
@@ -399,7 +474,12 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == BTN_AGENT:
-        await handle_agent_request(update, context)
+        context.user_data["state"] = "waiting_agent_msg"
+        agent_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]])
+        await update.message.reply_text(
+            "🤝 لطفا در قالب یک پیام درخواست و نکات قابل ملاحظه درباره خود را ارسال کرده و سپس تا تماس از طرف ادمین منتظر بمانید",
+            reply_markup=agent_markup
+        )
         return
 
     await update.message.reply_text("یکی از گزینه‌های منو رو انتخاب کن 👇", reply_markup=main_keyboard())
@@ -449,26 +529,6 @@ async def handle_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]])
     await update.message.reply_text(invite_text, parse_mode="Markdown", reply_markup=back_markup)
-
-
-async def handle_agent_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    full_name = update.effective_user.full_name
-    username = update.effective_user.username or "ندارد"
-
-    append_line(AGENT_REQUESTS_FILE, f"{user_id}|{full_name}|{username}")
-
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=(f"🤝 درخواست نمایندگی جدید\n\n"
-             f"👤 نام: {full_name}\n"
-             f"🆔 یوزرنیم: @{username}\n"
-             f"🔢 آیدی: {user_id}"))
-
-    agent_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]])
-    await update.message.reply_text(
-        "لطفا در قالب یک پیام درخواست و نکات قابل ملاحظه درباره خود را ارسال کرده و سپس تا تماس از طرف ادمین منتظر بمانید\n\nبه منوی اصلی بازگشتید!",
-        reply_markup=agent_markup)
 
 
 async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -536,7 +596,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📬 در صورتی که نتوانستید پاسخ سوالات و مشکلات خود را در بخش بالا پیدا کنید، جهت ارتباط بیشتر می توانید با دکمه زیر به پشتیبانی پیام بدید."
         )
         faq_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 ارسال پیام به پشتیبانی", url=f"https://t.me/{SUPPORT.lstrip('@-')}")],
+            [InlineKeyboardButton("💬 ارسال پیام به پشتیبانی", url=f"https://t.me/{SUPPORT.lstrip('@')}")],
             [InlineKeyboardButton("🔙 بازگشت به پشتیبانی", callback_data="back_to_support")]
         ])
         await query.edit_message_text(faq_text, parse_mode="Markdown", reply_markup=faq_markup)
@@ -544,7 +604,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "back_to_support":
         support_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 ارسال پیام به پشتیبانی", url=f"https://t.me/{SUPPORT.lstrip('@-')}")],
+            [InlineKeyboardButton("💬 ارسال پیام به پشتیبانی", url=f"https://t.me/{SUPPORT.lstrip('@')}")],
             [InlineKeyboardButton("❓ سوالات متداول", callback_data="faq")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]
         ])
@@ -570,7 +630,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("pay_amt_"):
         amt_key = data[8:]
         if amt_key == "custom":
-            await query.edit_message_text("لطفاً مبلغ مورد نظر خود را به تومان ارسال کنید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="add_credit")]]))
+            context.user_data["state"] = "waiting_custom_credit"
+            await query.edit_message_text("💸 مبلغ را وارد کنید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="add_credit")]]))
             return
         
         try:
@@ -579,7 +640,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount = 50000
 
         text = (
-            f"💳 لطفاً مبلغ {fmt(amount)} تومان را به کارت زیر واریز نمایید:\n\n"
+            f"💳 لطفاً مبلغ {fmt(amount)} تومان (و معادل ریالی آن) را به کارت زیر واریز نمایید:\n\n"
             f"====================\n"
             f"`{CARD_NUMBER}`\n"
             f"{CARD_OWNER}\n"
@@ -612,7 +673,12 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "gift_code":
-        await query.answer("❌ کد هدیه یافت نشد.", show_alert=True)
+        context.user_data["state"] = "waiting_gift_code"
+        await query.message.reply_text("🎁 کد هدیه خود را وارد کنید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu")]]))
+        return
+
+    if data == "apply_discount":
+        await query.answer("کد تخفیف معتبری یافت نشد.", show_alert=True)
         return
 
     if data.startswith("serv_"):
@@ -798,27 +864,35 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("vol_"):
         _, dk, vk = data.split("_", 2)
-        text = order_text(dk, vk) + "\n\nآیا تایید می‌کنی؟"
-        await query.edit_message_text(text, reply_markup=confirm_menu(dk, vk))
+        context.user_data["order"] = {"dk": dk, "vk": vk}
+        context.user_data["state"] = "waiting_username"
+        await query.edit_message_text("✍️ سرویس مورد نظر انتخاب شد. لطفا یک نام کاربری با حروف لاتین به طول حداکثر 20 کاراکتر وارد نمایید.")
         return
 
     if data.startswith("pay_"):
         _, dk, vk = data.split("_", 2)
-        context.user_data["order"] = {"dk": dk, "vk": vk}
+        order = context.user_data.get("order", {})
         title, days = DURATIONS[dk]
         gb, prices = VOLUMES[vk]
         price = prices[dk]
         text = (
-            f"💳 لطفاً مبلغ {fmt(price)} تومان را به کارت زیر واریز کنید:\n\n"
+            f"🛒 نام کاربری: `{order.get('username', 'user')}`\n"
+            f"🌐 سرور: SpeedUR\n"
+            f"📦 نوع سرویس: {gb} گیگ | {days} روزه\n\n"
+            f"لطفا مبلغ {fmt(price)} تومان (و معادل ریالی آن) را به کارت زیر واریز نمایید:\n\n"
             f"====================\n"
-            f"شماره کارت: `{CARD_NUMBER}`\n"
-            f"به نام: {CARD_OWNER}\n"
+            f"`{CARD_NUMBER}`\n"
+            f"{CARD_OWNER}\n"
             f"====================\n\n"
-            f"سپس عکس رسید پرداخت را همینجا برای من ارسال کنید. ✅"
+            f"📷 عکس رسید خود را در این مرحله ارسال نمایید.\n\n"
+            f"⚠️ از اپلیکیشن آپ و تاپ با توجه به محدودیت روزانه برای انتقال استفاده نکنید.\n"
+            f"⚠️ مبلغ را دقیق واریز کنید و از رند کردن آن خودداری فرمایید.\n"
+            f"⚠️ مبلغی که کپی میکنید ریالی توجه کنید."
         )
         pay_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("📋 کپی مبلغ", callback_data=f"copy_amt_{price}"), InlineKeyboardButton("📋 کپی شماره کارت", callback_data="copy_card")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"dur_{dk}")]
+            [InlineKeyboardButton("📤 ارسال رسید پرداخت", callback_data="send_receipt_hint")],
+            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]
         ])
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=pay_markup)
         return
@@ -850,6 +924,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     dk, vk = order["dk"], order["vk"]
+    username = order.get("username", f"user_{user_id}")
     title, days = DURATIONS[dk]
     gb, prices = VOLUMES[vk]
     price = prices[dk]
@@ -857,6 +932,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (f"🧾 رسید جدید دریافت شد\n\n"
               f"👤 کاربر: {update.effective_user.full_name} (@{update.effective_user.username})\n"
               f"🆔 آیدی: {user_id}\n"
+              f"👤 نام کاربری: {username}\n"
               f"⏳ مدت: {title}\n"
               f"📦 حجم: {gb} گیگ\n"
               f"💰 مبلغ: {fmt(price)} تومان")
@@ -867,6 +943,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption=caption,
         reply_markup=admin_decision_keyboard(user_id, dk, vk))
 
+    context.user_data.pop("order", None)
     await update.message.reply_text("✅ رسید شما برای بررسی ارسال شد. لطفاً منتظر تایید بمانید.")
 
 
