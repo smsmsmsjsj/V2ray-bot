@@ -17,7 +17,7 @@ import qrcode
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       ReplyKeyboardMarkup, InputFile, CopyTextButton)
 from telegram.constants import ParseMode
-from telegram.error import RetryAfter, NetworkError, BadRequest
+from telegram.error import RetryAfter, NetworkError, BadRequest, Conflict
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           MessageHandler, PicklePersistence, filters, ContextTypes)
 
@@ -1758,6 +1758,10 @@ def run_health_server():
 
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
+    if isinstance(err, Conflict):
+        # نمونه دیگری با همین توکن در حال اجراست؛ فقط در لاگ بنویس، به ادمین پیام نده
+        logger.warning("Conflict: نمونه دیگری با همین توکن در حال اجراست")
+        return
     logger.error("خطا:", exc_info=err)
     if isinstance(err, NetworkError):
         return
@@ -1770,14 +1774,21 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
                         "❌ مشکلی پیش آمد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
 
 
+# تسک‌های پس‌زمینه اینجا نگه داشته می‌شوند (نه در bot_data) تا PicklePersistence کرش نکند
+_BG_TASKS = []
+
+
 async def post_init(app: Application):
     global HTTP
     HTTP = httpx.AsyncClient()
-    app.bot_data["backup_task"] = asyncio.create_task(backup_loop(app))
-    app.bot_data["expire_task"] = asyncio.create_task(expire_loop())
+    _BG_TASKS.append(asyncio.create_task(backup_loop(app)))
+    _BG_TASKS.append(asyncio.create_task(expire_loop()))
 
 
 async def post_shutdown(app: Application):
+    for t in _BG_TASKS:
+        t.cancel()
+    _BG_TASKS.clear()
     if HTTP:
         await HTTP.aclose()
 
