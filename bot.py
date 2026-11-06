@@ -387,25 +387,16 @@ async def handle_my_services(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=main_keyboard())
         return
 
+    keyboard = []
     for line in my_services:
         parts = line.split("|")
-        _, uname, title, gb, sub_link = parts[0], parts[1], parts[2], parts[3], parts[4]
-        
-        msg_text = (
-            f"📲 **اطلاعات سرویس شما**\n\n"
-            f"👤 نام کاربری: `{uname}`\n"
-            f"📦 حجم سرویس: {gb} گیگابایت\n"
-            f"⏳ نوع اشتراک: {title}\n\n"
-            f"🔗 **لینک اشتراک:**\n`{sub_link}`"
-        )
-        qr_buf = generate_qr_buffer(sub_link)
-        
-        service_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📥 دریافت QR Code", callback_data=f"qr_{uname}")],
-            [InlineKeyboardButton("♻️ تمدید سرویس", callback_data="new")],
-            [InlineKeyboardButton("❌ حذف کامل اکانت", callback_data=f"del_{uname}")]
-        ])
-        await update.message.reply_photo(photo=InputFile(qr_buf, filename="qr.png"), caption=msg_text, parse_mode="Markdown", reply_markup=service_markup)
+        uname = parts[1]
+        keyboard.append([InlineKeyboardButton(f"🟢 {uname}", callback_data=f"serv_{uname}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text("🔹 برای مشاهده اطلاعات روی محصول کلیک کنید:", reply_markup=reply_markup)
 
 
 async def handle_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -496,6 +487,77 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "add_credit" or data == "gift_code":
         await query.message.reply_text("این بخش به‌زودی فعال خواهد شد.", reply_markup=main_keyboard())
+        return
+
+    if data.startswith("serv_"):
+        uname = data[5:]
+        lines = load_lines(SERVICES_FILE)
+        serv_line = None
+        for line in lines:
+            parts = line.split("|")
+            if len(parts) >= 5 and parts[1] == uname:
+                serv_line = parts
+                break
+        
+        if not serv_line:
+            await query.answer("سرویس مورد نظر پیدا نشد!", show_alert=True)
+            return
+
+        _, _, title, gb, sub_link = serv_line
+        
+        msg_text = (
+            f"📌 **اطلاعات سرویس شما**\n\n"
+            f"👤 نام کاربری: `{uname}`\n"
+            f"🟢 وضعیت: فعال\n"
+            f"🌐 نام پنل: SpeedUR\n"
+            f"⏳ زمان آخرین اتصال: نامشخص\n\n"
+            f"📦 حجم سرویس: {gb} گیگابایت\n"
+            f"⏳ نوع اشتراک: {title}\n"
+            f"📝 یادداشت: یادداشتی ثبت نشده است.\n\n"
+            f"🔗 **لینک اشتراک:**\n`{sub_link}`"
+        )
+        
+        service_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 دریافت QR Code", callback_data=f"qr_{uname}")],
+            [InlineKeyboardButton("⏹ توقف سرویس", callback_data=f"stop_{uname}"), InlineKeyboardButton("♻️ تمدید سرویس", callback_data="new")],
+            [InlineKeyboardButton("❌ حذف لینک فعلی و دریافت لینک جدید", callback_data=f"reset_{uname}")],
+            [InlineKeyboardButton("✏️ ویرایش یادداشت", callback_data=f"note_{uname}")],
+            [InlineKeyboardButton("🔙 بازگشت به لیست سرویس ها", callback_data="back_to_services")]
+        ])
+        await query.edit_message_text(msg_text, parse_mode="Markdown", reply_markup=service_markup)
+        return
+
+    if data == "back_to_services":
+        user_id = query.from_user.id
+        lines = load_lines(SERVICES_FILE)
+        my_services = [line for line in lines if line.split("|")[0] == str(user_id)]
+        
+        keyboard = []
+        for line in my_services:
+            parts = line.split("|")
+            uname = parts[1]
+            keyboard.append([InlineKeyboardButton(f"🟢 {uname}", callback_data=f"serv_{uname}")])
+        keyboard.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")])
+        
+        await query.edit_message_text("🔹 برای مشاهده اطلاعات روی محصول کلیک کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if data.startswith("qr_"):
+        uname = data[3:]
+        lines = load_lines(SERVICES_FILE)
+        sub_link = ""
+        for line in lines:
+            parts = line.split("|")
+            if len(parts) >= 5 and parts[1] == uname:
+                sub_link = parts[4]
+                break
+        if sub_link:
+            qr_buf = generate_qr_buffer(sub_link)
+            await query.message.reply_photo(photo=InputFile(qr_buf, filename="qr.png"), caption=f"📥 QR Code مربوط به نام کاربری: `{uname}`", parse_mode="Markdown")
+        return
+
+    if data.startswith("stop_") or data.startswith("reset_") or data.startswith("note_"):
+        await query.answer("این قابلیت به‌زودی فعال می‌شود.", show_alert=True)
         return
 
     if data.startswith("hlp_"):
