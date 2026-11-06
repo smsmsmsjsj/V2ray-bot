@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("BOT_TOKEN", "")
 SUPPORT = os.environ.get("SUPPORT_USERNAME", "@Dudgeuvsuvduv")
 
-CARD_NUMBER = os.environ.get("CARD_NUMBER", "6219861016641267")
-CARD_OWNER = os.environ.get("CARD_OWNER", "مهدی هدایت زاده")
+CARD_NUMBER = os.environ.get("CARD_NUMBER", "5041-7210-4718-7167")
+CARD_OWNER = os.environ.get("CARD_OWNER", "افروز خادمى")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "5821799233"))
 
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "@speedv2raymaeket")
@@ -548,13 +548,21 @@ async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         caption_text = (
             f"🟢 اشتراک شما با موفقیت ساخته شد.\n"
-            f"👤 نام کاربری: `{username}`\n\n"
-            f"🔗 **لینک اشتراک شما:**\n`{result}`\n\n"
+            f"👤 نام کاربری شما :\n`{username}`\n\n"
+            f"🌐 لینک اشتراک شما:\n\n"
+            f"`{result}`\n\n"
             f"📲 برای کپی کردن لینک بالا فقط کافیست آدرس لینک را یک بار لمس کنید!"
         )
         qr_buf = generate_qr_buffer(result)
-        test_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")]])
-        await update.message.reply_photo(photo=InputFile(qr_buf, filename="test_qr.png"), caption=caption_text, parse_mode="Markdown", reply_markup=test_markup)
+        
+        service_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏳ زمان اشتراک", callback_data="none"), InlineKeyboardButton("1 روز", callback_data="none")],
+            [InlineKeyboardButton("🌐 حجم سرویس", callback_data="none"), InlineKeyboardButton("0.1 گیگابایت", callback_data="none")],
+            [InlineKeyboardButton("📥 دریافت QR Code", callback_data=f"qr_{username}")],
+            [InlineKeyboardButton("📚 آموزش نصب", callback_data="hlp_android")]
+        ])
+        
+        await update.message.reply_photo(photo=InputFile(qr_buf, filename="test_qr.png"), caption=caption_text, parse_mode="Markdown", reply_markup=service_markup)
     else:
         await update.message.reply_text(f"❌ متاسفانه مشکلی پیش اومد:\n{result}\n\nبا پشتیبانی تماس بگیر: {SUPPORT}")
 
@@ -565,6 +573,23 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "check_join":
         await check_join_callback(update, context)
+        return
+
+    if data.startswith("copy_amt_"):
+        amt = data[9:]
+        await query.answer(f"مبلغ کپی شد: {amt}", show_alert=True)
+        return
+
+    if data == "copy_card":
+        await query.answer(f"شماره کارت کپی شد: {CARD_NUMBER}", show_alert=True)
+        return
+
+    if data == "send_receipt_hint":
+        await query.answer("لطفا عکس رسید پرداخت خود را همینجا ارسال کنید.", show_alert=True)
+        return
+
+    if data == "none":
+        await query.answer()
         return
 
     await query.answer()
@@ -657,19 +682,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         context.user_data["credit_order"] = amount
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=pay_markup)
-        return
-
-    if data == "copy_card":
-        await query.answer(f"شماره کارت کپی شد: {CARD_NUMBER}", show_alert=True)
-        return
-
-    if data.startswith("copy_amt_"):
-        amt = data[9:]
-        await query.answer(f"مبلغ کپی شد: {amt}", show_alert=True)
-        return
-
-    if data == "send_receipt_hint":
-        await query.answer("لطفا عکس رسید پرداخت خود را همینجا ارسال کنید.", show_alert=True)
         return
 
     if data == "gift_code":
