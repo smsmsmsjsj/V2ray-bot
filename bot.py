@@ -271,7 +271,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("order", None)
     user_id = update.effective_user.id
 
-    # ثبت تاریخ ورود کاربر
     users_data = load_lines(USERS_JOIN_FILE)
     if not any(line.startswith(f"{user_id}|") for line in users_data):
         now_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
