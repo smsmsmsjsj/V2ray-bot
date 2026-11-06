@@ -21,16 +21,13 @@ from telegram.error import RetryAfter, NetworkError, BadRequest, Conflict
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           MessageHandler, PicklePersistence, filters, ContextTypes)
 
-# ============================== لاگ ==============================
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-# جلوگیری از چاپ آدرس‌های حاوی توکن در لاگ
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-# ============================ تنظیمات ============================
 def env_required(name: str) -> str:
     v = os.environ.get(name, "").strip()
     if not v:
@@ -50,16 +47,15 @@ PANEL_API_KEY = env_required("PANEL_API_KEY")
 PANEL_GROUP_NAME = os.environ.get("PANEL_GROUP_ID", "group1")
 BRAND = os.environ.get("BRAND_NAME", "SpeedUR")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
-PORT = os.environ.get("PORT")  # فقط اگر روی Render و مشابه اجرا می‌کنی
+PORT = os.environ.get("PORT")
 REFERRAL_PERCENT = int(os.environ.get("REFERRAL_PERCENT", "5"))
 
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bot.db")
 PERSIST_PATH = os.path.join(DATA_DIR, "bot_state.pickle")
 
-RECEIPT_TTL = 24 * 3600  # اعتبار سفارش منتظر رسید
+RECEIPT_TTL = 24 * 3600
 
-# ============================== تعرفه ==============================
 DURATIONS = {
     "d1": ("1 ماهه", 30),
     "d2": ("2 ماهه", 60),
@@ -69,8 +65,6 @@ DURATIONS = {
 }
 
 VOLUMES = {
-    # TODO: قیمت 5 ماهه v10 با 3 ماهه یکسان است؛ چک کن اشتباه تایپی نباشد
-    # TODO: قیمت 5 ماهه v200 (1,000,000) نسبت به 3 ماهه جهش زیادی دارد؛ چک کن
     "v10":  (10,  {"d1": 50000,  "d2": 55000,  "d3": 65000,  "d5": 65000,   "d12": 70000}),
     "v20":  (20,  {"d1": 95000,  "d2": 110000, "d3": 125000, "d5": 145000,  "d12": 160000}),
     "v30":  (30,  {"d1": 120000, "d2": 135000, "d3": 150000, "d5": 170000,  "d12": 190000}),
@@ -81,7 +75,6 @@ VOLUMES = {
     "v200": (200, {"d1": 600000, "d2": 650000, "d3": 780000, "d5": 1000000, "d12": 1200000}),
 }
 
-# ============================ متن‌ها و دکمه‌ها ============================
 WELCOME = "🚀 به فروشگاه v2ray market خوش آمدید\n\nیکی از گزینه‌ها رو انتخاب کن:"
 
 BTN_NEW = "🚀 خرید سرویس جدید"
@@ -135,7 +128,6 @@ USERNAME_RE = re.compile(r"^[a-z0-9_]{3,20}$")
 HTML = ParseMode.HTML
 
 
-# ============================== ابزارهای کوچک ==============================
 def esc(s) -> str:
     return html.escape(str(s), quote=False)
 
@@ -159,9 +151,8 @@ _LAST = {}
 
 
 def throttled(user_id, key, seconds) -> bool:
-    """True یعنی خیلی زود تکرار شده."""
     now = time.time()
-    if len(_LAST) > 5000:  # جلوگیری از رشد بی‌نهایت حافظه
+    if len(_LAST) > 5000:
         for k in [k for k, v in _LAST.items() if now - v > 3600]:
             _LAST.pop(k, None)
     k = (user_id, key)
@@ -202,7 +193,6 @@ async def notify_admin(bot, text):
     await safe_send(bot, ADMIN_ID, text[:4000])
 
 
-# ============================== دیتابیس (SQLite) ==============================
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER PRIMARY KEY, joined_at TEXT NOT NULL, test_used INTEGER NOT NULL DEFAULT 0);
@@ -246,7 +236,6 @@ def init_db():
         c.executescript(SCHEMA)
 
 
-# ---- کاربران ----
 def add_user(uid) -> bool:
     with conn() as c:
         cur = c.execute("INSERT OR IGNORE INTO users(user_id, joined_at) VALUES(?,?)", (uid, now_str()))
@@ -275,7 +264,6 @@ def unclaim_test(uid):
         c.execute("UPDATE users SET test_used=0 WHERE user_id=?", (uid,))
 
 
-# ---- موجودی ----
 def get_balance(uid) -> int:
     with conn() as c:
         r = c.execute("SELECT balance FROM balances WHERE user_id=?", (uid,)).fetchone()
@@ -296,7 +284,6 @@ def try_deduct(uid, amount) -> bool:
         return cur.rowcount == 1
 
 
-# ---- سرویس‌ها ----
 def add_service(uid, username, title, gb, days, link):
     with conn() as c:
         c.execute("INSERT INTO services(user_id, username, title, gb, days, link, created_at) "
@@ -309,7 +296,6 @@ def user_services(uid):
 
 
 def find_service(uname, uid):
-    """فقط اگر سرویس مال همین کاربر باشد برمی‌گرداند."""
     with conn() as c:
         return c.execute("SELECT * FROM services WHERE username=? AND user_id=?", (uname, uid)).fetchone()
 
@@ -324,7 +310,6 @@ def update_service_link(uname, link):
         c.execute("UPDATE services SET link=? WHERE username=?", (link, uname))
 
 
-# ---- سفارش‌ها ----
 def create_order(uid, kind, amount, dk=None, vk=None, username=None,
                  discount_code=None, method="card", status="awaiting_receipt") -> int:
     with conn() as c:
@@ -359,7 +344,6 @@ def attach_receipt(oid, uid, file_uid) -> bool:
 
 
 def revert_receipt(oid):
-    """اگر ارسال رسید به ادمین شکست خورد، سفارش به حالت قبل برگردد و رسید آزاد شود."""
     with conn() as c:
         c.execute("UPDATE orders SET status='awaiting_receipt', receipt_uid=NULL "
                   "WHERE id=? AND status='pending'", (oid,))
@@ -371,7 +355,6 @@ def receipt_used_before(file_uid) -> bool:
 
 
 def cancel_awaiting(oid):
-    """سفارشِ منتظر رسید را لغو و کد تخفیفش را آزاد می‌کند."""
     if not oid:
         return
     o = get_order(oid)
@@ -393,7 +376,6 @@ def expire_old_orders() -> int:
     return n
 
 
-# ---- دعوت ----
 def add_referral(referrer, referred):
     with conn() as c:
         c.execute("INSERT OR IGNORE INTO referrals(referred_id, referrer_id) VALUES(?,?)", (referred, referrer))
@@ -410,7 +392,6 @@ def get_referrer(uid):
     return r["referrer_id"] if r else None
 
 
-# ---- تخفیف و هدیه ----
 def lookup_discount(code):
     with conn() as c:
         r = c.execute("SELECT percent FROM discounts WHERE code=? AND active=1 "
@@ -453,14 +434,13 @@ def redeem_gift_safe(code: str, uid: int) -> int:
         return 0
 
 
-# ============================== پنل ==============================
 HTTP: "httpx.AsyncClient | None" = None
 _GROUP_CACHE = {"ids": None}
 
 
 async def panel(method, path, **kw):
     return await HTTP.request(method, f"{PANEL_URL}{path}",
-                              headers={"X-Api-Key": PANEL_API_KEY}, timeout=25.0, **kw)
+                              headers={"X-Api-Key": PANEL_API_KEY}, **kw)
 
 
 def sub_url(d: dict) -> str:
@@ -485,7 +465,6 @@ def parse_expire(v):
 
 
 def quota_valid(info: dict) -> bool:
-    """آیا زمان و حجم سرویس هنوز باقی مانده؟"""
     now = time.time()
     expire = parse_expire(info.get("expire"))
     limit = int(info.get("data_limit") or 0)
@@ -512,11 +491,9 @@ async def get_group_ids():
                 if str(g.get("name", "")).lower() == str(PANEL_GROUP_NAME).lower():
                     _GROUP_CACHE["ids"] = [g["id"]]
                     return _GROUP_CACHE["ids"]
-        # پنل جواب داد ولی گروه پیدا نشد → نسخه جایگزین (کش می‌شود)
         _GROUP_CACHE["ids"] = _fallback_groups()
         return _GROUP_CACHE["ids"]
     except Exception as e:
-        # خطای موقت شبکه: کش نکن تا دفعه بعد دوباره تلاش شود
         logger.warning(f"خطا در گرفتن گروه‌ها: {e}")
         return _fallback_groups()
 
@@ -532,7 +509,6 @@ async def panel_get_user(username):
 
 
 async def panel_user_exists(username):
-    """True / False / None (نامشخص)"""
     try:
         r = await panel("GET", f"/api/user/{username}")
         if r.status_code == 200:
@@ -571,7 +547,7 @@ async def panel_create_user(username: str, gb: float, days: int):
             info = await panel_get_user(username)
             link = sub_url(info) if info else ""
         if not link:
-            await panel_delete_user(username)  # جلوگیری از کاربر یتیم در پنل
+            await panel_delete_user(username)
             return False, "کاربر ساخته شد ولی لینک اشتراک برنگشت (کاربر حذف شد)."
         return True, link
     except Exception as e:
@@ -585,8 +561,6 @@ async def panel_renew(username: str, gb: float, days: int):
     now = time.time()
     expire = parse_expire(info.get("expire"))
     limit = int(info.get("data_limit") or 0)
-    # سرویسِ متوقف‌شده (disabled) که هنوز زمان/حجم دارد هم «فعال» حساب می‌شود
-    # تا باقیمانده نسوزد (مطابق FAQ)
     active = info.get("status") in ("active", "disabled", "on_hold") and quota_valid(info)
     add_bytes = int(gb * 1024 ** 3)
     try:
@@ -594,7 +568,7 @@ async def panel_renew(username: str, gb: float, days: int):
             new_expire = int((expire or now) + days * 86400)
             new_limit = (limit + add_bytes) if limit else add_bytes
         else:
-            await panel("POST", f"/api/user/{username}/reset")  # صفر کردن مصرف
+            await panel("POST", f"/api/user/{username}/reset")
             new_expire = int(now + days * 86400)
             new_limit = add_bytes
         resp = await panel("PUT", f"/api/user/{username}",
@@ -615,7 +589,6 @@ async def panel_change_status(username: str, status: str) -> bool:
 
 
 async def panel_revoke_sub(username: str) -> str:
-    """ساخت لینک اشتراک جدید (نه ریست مصرف)."""
     try:
         resp = await panel("POST", f"/api/user/{username}/revoke_sub")
         if resp.status_code in (200, 201):
@@ -625,7 +598,6 @@ async def panel_revoke_sub(username: str) -> str:
     return ""
 
 
-# ============================== عضویت کانال ==============================
 _JOIN_CACHE = {}
 _JOIN_ALERT = {"t": 0.0}
 
@@ -643,7 +615,6 @@ async def is_member(bot, user_id) -> bool:
             _JOIN_CACHE[user_id] = now
         return ok
     except Exception as e:
-        # اگر ربات ادمین کانال نباشد، کاربران بلاک نشوند (fail-open) و ادمین خبردار شود
         logger.warning(f"خطا در بررسی عضویت: {e}")
         if now - _JOIN_ALERT["t"] > 3600:
             _JOIN_ALERT["t"] = now
@@ -662,7 +633,6 @@ JOIN_TEXT = "برای استفاده از بات، اول باید تو کانا
 
 
 async def require_join(update, context, user_id) -> bool:
-    """True یعنی کاربر عضو نیست و پیام عضویت فرستاده شد."""
     if user_id == ADMIN_ID or await is_member(context.bot, user_id):
         return False
     target = update.message or (update.callback_query.message if update.callback_query else None)
@@ -671,7 +641,6 @@ async def require_join(update, context, user_id) -> bool:
     return True
 
 
-# ============================== کیبوردها و متن‌ها ==============================
 def main_keyboard():
     return ReplyKeyboardMarkup([
         [BTN_NEW], [BTN_TEST, BTN_RENEW], [BTN_MY],
@@ -725,7 +694,6 @@ def support_kb():
 
 
 async def services_kb(uid, prefix):
-    """لیست سرویس‌ها با وضعیت واقعی (زنده از پنل)."""
     svcs = user_services(uid)
     infos = await asyncio.gather(*(panel_get_user(s["username"]) for s in svcs))
     rows = []
@@ -824,7 +792,6 @@ def service_view(svc, info):
         f"📦 نوع اشتراک: {esc(svc['title'])}{usage}\n\n"
         f"🔗 لینک اشتراک:\n<code>{esc(svc['link'])}</code>"
     )
-    # دکمه توقف/فعالسازی فقط برای وضعیت active و disabled
     second_row = []
     if st == "active":
         second_row.append(InlineKeyboardButton("⏹ توقف سرویس", callback_data=f"stop_{uname}"))
@@ -859,13 +826,11 @@ async def send_service_to_user(bot, user_id, username, link, days, gb, renewed=F
 
 
 def clear_flow(context):
-    # اگر سفارش منتظر رسید رها شد، لغو و کد تخفیفش آزاد شود
     cancel_awaiting(context.user_data.get("order_id"))
     for k in ("state", "order", "order_id"):
         context.user_data.pop(k, None)
 
 
-# ============================== انجام سفارش ==============================
 async def reward_referrer(bot, buyer_id, amount):
     ref = get_referrer(buyer_id)
     if not ref or ref == buyer_id or REFERRAL_PERCENT <= 0:
@@ -879,7 +844,6 @@ async def reward_referrer(bot, buyer_id, amount):
 
 
 async def fulfill_order(bot, oid):
-    """سفارشی که وضعیتش 'processing' است را اجرا می‌کند. -> (ok, error)"""
     o = get_order(oid)
     uid = o["user_id"]
 
@@ -904,7 +868,7 @@ async def fulfill_order(bot, oid):
         except Exception as e:
             logger.error(f"ثبت سرویس در دیتابیس ناموفق: {e}")
             await notify_admin(bot, f"⚠️ سرویس {username} در پنل ساخته شد ولی در دیتابیس ثبت نشد:\n{e}")
-    else:  # renew
+    else:
         ok, res = await panel_renew(username, gb, days)
         if not ok:
             return False, res
@@ -955,7 +919,6 @@ async def handle_admin_decision(update, context, data):
                         f"❌ متاسفانه رسید شما تایید نشد. لطفاً با پشتیبانی تماس بگیرید: {SUPPORT}")
         return
 
-    # تایید: ابتدا قفل اتمیک
     if not claim_order(oid, "pending", "processing"):
         await ack(q, "این سفارش قبلاً بررسی شده یا در حال پردازش است.", True)
         return
@@ -966,7 +929,7 @@ async def handle_admin_decision(update, context, data):
         ok, err = False, f"استثنا: {e}"
         logger.exception("fulfill_order")
     if not ok:
-        claim_order(oid, "processing", "pending")  # دوباره قابل تایید
+        claim_order(oid, "processing", "pending")
         await notify_admin(context.bot, f"⚠️ انجام سفارش #{oid} ناموفق بود:\n{err}\n\n"
                                         f"بعد از رفع مشکل دوباره روی ✅ همان رسید بزن.")
         return
@@ -976,7 +939,6 @@ async def handle_admin_decision(update, context, data):
         pass
 
 
-# ============================== هندلرها ==============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_flow(context)
     user_id = update.effective_user.id
@@ -1165,32 +1127,43 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("یکی از گزینه‌های منو رو انتخاب کن 👇", reply_markup=main_keyboard())
 
 
+_TEST_LOCKS = set()
+
+
 async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if throttled(user_id, "test", 15):
+    if user_id in _TEST_LOCKS or throttled(user_id, "test", 15):
+        await update.message.reply_text("⏳ درخواست قبلی شما در حال پردازش است، لطفاً صبر کنید.")
         return
-    if not claim_test(user_id):  # علامت‌گذاری اتمیک قبل از ساخت
-        await update.message.reply_text("❌ شما قبلاً اکانت تست گرفته‌اید. هر کاربر فقط یک بار می‌تواند تست بگیرد.")
-        return
-    await update.message.reply_text("⏳ در حال ساخت اکانت تست...")
-    username = f"test_{user_id}_{secrets.token_hex(2)}"
-    ok, result = await panel_create_user(username, gb=0.1, days=1)
-    if ok:
-        try:
-            add_service(user_id, username, "اکانت تست", 0.1, 1, result)
-        except Exception as e:
-            logger.error(f"ثبت تست: {e}")
-        try:
-            await send_service_to_user(context.bot, user_id, username, result, 1, 0.1)
-        except Exception as e:
-            logger.error(f"ارسال تست: {e}")
-            await update.message.reply_text(f"اکانت تست ساخته شد:\n<code>{esc(result)}</code>", parse_mode=HTML)
-    else:
-        unclaim_test(user_id)  # شکست خورد، حق تست برگردد
-        await update.message.reply_text(
-            f"❌ متاسفانه مشکلی پیش اومد. چند دقیقه دیگه دوباره امتحان کن یا با پشتیبانی تماس بگیر: {SUPPORT}")
-        logger.error(f"خطای ساخت تست: {result}")
-        await notify_admin(context.bot, f"⚠️ خطا در ساخت تست برای {user_id}:\n{result}")
+    _TEST_LOCKS.add(user_id)
+    try:
+        if not claim_test(user_id):
+            await update.message.reply_text(
+                "❌ شما قبلاً اکانت تست گرفته‌اید. هر کاربر فقط یک بار می‌تواند تست بگیرد.")
+            return
+        await update.message.reply_text("⏳ در حال ساخت اکانت تست...")
+        await context.bot.send_chat_action(user_id, "typing")
+        username = f"test_{user_id}_{secrets.token_hex(2)}"
+        ok, result = await panel_create_user(username, gb=0.1, days=1)
+        if ok:
+            try:
+                add_service(user_id, username, "اکانت تست", 0.1, 1, result)
+            except Exception as e:
+                logger.error(f"ثبت تست: {e}")
+            try:
+                await send_service_to_user(context.bot, user_id, username, result, 1, 0.1)
+            except Exception as e:
+                logger.error(f"ارسال تست: {e}")
+                await update.message.reply_text(
+                    f"اکانت تست ساخته شد:\n<code>{esc(result)}</code>", parse_mode=HTML)
+        else:
+            unclaim_test(user_id)
+            await update.message.reply_text(
+                f"❌ متاسفانه مشکلی پیش اومد. چند دقیقه دیگه دوباره امتحان کن یا با پشتیبانی تماس بگیر: {SUPPORT}")
+            logger.error(f"خطای ساخت تست: {result}")
+            await notify_admin(context.bot, f"⚠️ خطا در ساخت تست برای {user_id}:\n{result}")
+    finally:
+        _TEST_LOCKS.discard(user_id)
 
 
 async def show_order_confirm(q, order):
@@ -1228,7 +1201,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(JOIN_TEXT, reply_markup=join_keyboard())
         return
 
-    # ---------- شاخه‌هایی که خودشان answer می‌دهند ----------
     if data == "send_receipt":
         oid = context.user_data.get("order_id")
         o = get_order(oid) if oid else None
@@ -1328,7 +1300,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         amount = final_price(order)
 
-        # کلیک تکراری روی کارت‌به‌کارت: همان سفارش قبلی دوباره نشان داده شود (کد تخفیف دوباره مصرف نشود)
         if data == "paycard" and order.get("oid"):
             prev = get_order(order["oid"])
             if (prev and prev["user_id"] == user_id and prev["status"] == "awaiting_receipt"
@@ -1343,7 +1314,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ack(q, "این نام کاربری در این فاصله گرفته شد. دوباره از منو شروع کن.", True)
             return
 
-        # سفارش منتظر رسیدِ قبلی (اگر هست) لغو شود
         cancel_awaiting(context.user_data.get("order_id"))
         context.user_data.pop("order_id", None)
 
@@ -1365,7 +1335,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(pay_text(amount), parse_mode=HTML, reply_markup=pay_markup(amount))
             return
 
-        # پرداخت با کیف پول
         if not try_deduct(user_id, amount):
             release_discount(code)
             await ack(q, f"موجودی کافی نیست.\nموجودی شما: {fmt(get_balance(user_id))} تومان", True)
@@ -1375,7 +1344,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                order["username"], code, "wallet", "processing")
         except Exception:
             logger.exception("create_order wallet")
-            add_balance(user_id, amount)  # بازگشت پول
+            add_balance(user_id, amount)
             release_discount(code)
             await ack(q, "❌ خطای داخلی؛ مبلغ برگشت داده شد. دوباره تلاش کنید.", True)
             return
@@ -1394,7 +1363,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=user_id, text="✅ پرداخت از موجودی انجام شد.",
                                            reply_markup=main_keyboard())
         else:
-            add_balance(user_id, amount)  # بازگشت پول
+            add_balance(user_id, amount)
             release_discount(code)
             set_order_status(oid, "failed")
             await notify_admin(context.bot, f"⚠️ سفارش کیف پول #{oid} کاربر {user_id} ناموفق بود (پول برگشت داده شد):\n{err}")
@@ -1405,7 +1374,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await ack(q)
 
-    # ---------- بقیه ----------
     if data == "none":
         return
 
@@ -1600,7 +1568,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                              reply_markup=admin_keyboard(oid))
     except Exception as e:
         logger.error(f"ارسال رسید به ادمین ناموفق: {e}")
-        revert_receipt(oid)  # وضعیت + رسید آزاد شود تا کاربر بتواند دوباره بفرستد
+        revert_receipt(oid)
         await msg.reply_text("❌ ارسال رسید به مدیریت ناموفق بود. چند دقیقه بعد دوباره تلاش کنید.")
         return
 
@@ -1610,7 +1578,6 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "لطفا از ارسال مجدد رسید خودداری نمایید.", reply_markup=main_keyboard())
 
 
-# ============================== دستورات ادمین ==============================
 async def cmd_stats(update, context):
     with conn() as c:
         users = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
@@ -1700,7 +1667,6 @@ async def cmd_broadcast(update, context):
     await msg.reply_text(f"📣 ارسال شد: {ok} | ناموفق: {fail}")
 
 
-# ============================== بکاپ و سلامت ==============================
 def do_backup() -> str:
     path = os.path.join(DATA_DIR, f"backup_{datetime.now().strftime('%a')}.db")
     src = sqlite3.connect(DB_PATH)
@@ -1725,7 +1691,6 @@ async def backup_loop(app):
 
 
 async def expire_loop():
-    """هر نیم ساعت سفارش‌های منتظر رسیدِ منقضی را بسته و کد تخفیفشان را آزاد می‌کند."""
     while True:
         await asyncio.sleep(1800)
         try:
@@ -1759,14 +1724,13 @@ def run_health_server():
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
     if isinstance(err, Conflict):
-        # نمونه دیگری با همین توکن در حال اجراست؛ فقط در لاگ بنویس، به ادمین پیام نده
         logger.warning("Conflict: نمونه دیگری با همین توکن در حال اجراست")
         return
     logger.error("خطا:", exc_info=err)
     if isinstance(err, NetworkError):
         return
     if isinstance(err, BadRequest) and "not modified" in str(err).lower():
-        return  # ویرایش پیام با متن یکسان؛ خطای واقعی نیست
+        return
     if not throttled(0, "err_notify", 60):
         await notify_admin(context.bot, f"⚠️ خطای ربات: {type(err).__name__}: {err}")
     if isinstance(update, Update) and update.effective_chat:
@@ -1774,13 +1738,15 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
                         "❌ مشکلی پیش آمد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
 
 
-# تسک‌های پس‌زمینه اینجا نگه داشته می‌شوند (نه در bot_data) تا PicklePersistence کرش نکند
 _BG_TASKS = []
 
 
 async def post_init(app: Application):
     global HTTP
-    HTTP = httpx.AsyncClient()
+    HTTP = httpx.AsyncClient(
+        timeout=httpx.Timeout(25.0, connect=5.0),
+        limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=60))
+    await get_group_ids()
     _BG_TASKS.append(asyncio.create_task(backup_loop(app)))
     _BG_TASKS.append(asyncio.create_task(expire_loop()))
 
@@ -1819,7 +1785,7 @@ def main():
     app.add_error_handler(on_error)
 
     logger.info("بات در حال اجراست...")
-    app.run_polling(bootstrap_retries=-1)  # تلاش مجدد نامحدود موقع استارت (خطای 503 شبکه)
+    app.run_polling(bootstrap_retries=-1)
 
 
 if __name__ == "__main__":
