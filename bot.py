@@ -251,7 +251,10 @@ async def panel_reset_sub(username: str):
             resp = await client.post(f"{PANEL_URL}/api/user/{username}/reset", headers=headers)
             if resp.status_code in (200, 201):
                 data = resp.json()
-                return data.get("subscription_url") or ""
+                sub_url = data.get("subscription_url") or data.get("links") or ""
+                if isinstance(sub_url, list):
+                    sub_url = "\n".join(sub_url)
+                return sub_url
         return ""
     except Exception:
         return ""
@@ -543,7 +546,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         service_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("📥 دریافت QR Code", callback_data=f"qr_{uname}")],
             [InlineKeyboardButton("⏹ توقف سرویس", callback_data=f"stop_{uname}"), InlineKeyboardButton("♻️ تمدید سرویس", callback_data="new")],
-            [InlineKeyboardButton("❌ حذف لینک فعلی و دریافت لینک جدید", callback_data=f"reset_{uname}")],
+            [InlineKeyboardButton("❌ حذف لینک فعلی و دریافت لینک جدید", callback_data=f"reset_confirm_{uname}")],
             [InlineKeyboardButton("✏️ ویرایش یادداشت", callback_data=f"note_{uname}")],
             [InlineKeyboardButton("🔙 بازگشت به لیست سرویس ها", callback_data="back_to_services")]
         ])
@@ -554,13 +557,57 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uname = data[5:]
         success = await panel_change_status(uname, "disabled")
         if success:
-            await query.answer("⏹ سرویس با موفقیت متوقف شد.", show_alert=True)
+            service_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📥 دریافت QR Code", callback_data=f"qr_{uname}")],
+                [InlineKeyboardButton("▶️ فعالسازی سرویس", callback_data=f"active_{uname}"), InlineKeyboardButton("♻️ تمدید سرویس", callback_data="new")],
+                [InlineKeyboardButton("❌ حذف لینک فعلی و دریافت لینک جدید", callback_data=f"reset_confirm_{uname}")],
+                [InlineKeyboardButton("✏️ ویرایش یادداشت", callback_data=f"note_{uname}")],
+                [InlineKeyboardButton("🔙 بازگشت به لیست سرویس ها", callback_data="back_to_services")]
+            ])
+            await query.edit_message_text(
+                query.message.text.replace("🟢 وضعیت: فعال", "🔴 وضعیت: غیرفعال"),
+                parse_mode="Markdown",
+                reply_markup=service_markup
+            )
+            await query.answer("امکان اتصال به این اشتراک به طور موقت غیر فعال شد!", show_alert=True)
         else:
             await query.answer("❌ خطا در توقف سرویس.", show_alert=True)
         return
 
-    if data.startswith("reset_"):
-        uname = data[6:]
+    if data.startswith("active_"):
+        uname = data[7:]
+        success = await panel_change_status(uname, "active")
+        if success:
+            service_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📥 دریافت QR Code", callback_data=f"qr_{uname}")],
+                [InlineKeyboardButton("⏹ توقف سرویس", callback_data=f"stop_{uname}"), InlineKeyboardButton("♻️ تمدید سرویس", callback_data="new")],
+                [InlineKeyboardButton("❌ حذف لینک فعلی و دریافت لینک جدید", callback_data=f"reset_confirm_{uname}")],
+                [InlineKeyboardButton("✏️ ویرایش یادداشت", callback_data=f"note_{uname}")],
+                [InlineKeyboardButton("🔙 بازگشت به لیست سرویس ها", callback_data="back_to_services")]
+            ])
+            await query.edit_message_text(
+                query.message.text.replace("🔴 وضعیت: غیرفعال", "🟢 وضعیت: فعال"),
+                parse_mode="Markdown",
+                reply_markup=service_markup
+            )
+            await query.answer("امکان اتصال به این اشتراک مجدداً فعال شد!", show_alert=True)
+        else:
+            await query.answer("❌ خطا در فعالسازی سرویس.", show_alert=True)
+        return
+
+    if data.startswith("reset_confirm_"):
+        uname = data[14:]
+        warning_text = (
+            "⚠️ **هشدار:** درصورت تایید، فیلترشکن فعلی شما بلافاصله از کار می افتد و برای استفاده از باقیمانده سرویس خود باید لینک جدید که در ادامه ارسال می گردد را از نو وارد نرم افزار کنید. آیا مطمئن هستید؟"
+        )
+        warning_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ تایید", callback_data=f"reset_do_{uname}"), InlineKeyboardButton("❌ انصراف", callback_data=f"serv_{uname}")]
+        ])
+        await query.edit_message_text(warning_text, parse_mode="Markdown", reply_markup=warning_markup)
+        return
+
+    if data.startswith("reset_do_"):
+        uname = data[9:]
         new_sub = await panel_reset_sub(uname)
         if new_sub:
             lines = load_lines(SERVICES_FILE)
@@ -572,9 +619,22 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 new_lines.append("|".join(parts))
             with open(SERVICES_FILE, "w", encoding="utf-8") as f:
                 f.write("\n".join(new_lines) + "\n")
-            await query.answer("✅ لینک جدید با موفقیت دریافت شد.", show_alert=True)
+            
+            await query.message.delete()
+            await context.bot.send_message(
+                chat_id=query.from_user.id,
+                text=f"✅ لینک جدید شما با موفقیت ساخته شد:\n\n`{new_sub}`",
+                parse_mode="Markdown"
+            )
+            qr_buf = generate_qr_buffer(new_sub)
+            await context.bot.send_photo(
+                chat_id=query.from_user.id,
+                photo=InputFile(qr_buf, filename="new_qr.png"),
+                caption=f"📥 QR Code لینک جدید برای کاربر: `{uname}`",
+                parse_mode="Markdown"
+            )
         else:
-            await query.answer("❌ خطا در ریست کردن لینک.", show_alert=True)
+            await query.answer("❌ خطا در دریافت لینک جدید از پنل.", show_alert=True)
         return
 
     if data.startswith("note_"):
