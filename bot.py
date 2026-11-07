@@ -1165,32 +1165,41 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("یکی از گزینه‌های منو رو انتخاب کن 👇", reply_markup=main_keyboard())
 
 
+_TEST_BUSY = set()
+
+
 async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if throttled(user_id, "test", 15):
+    # اگر همین الان در حال ساخت تست برای این کاربر هستیم، سریع جواب بده (بدون سکوت)
+    if user_id in _TEST_BUSY:
+        await update.message.reply_text("⏳ اکانت تست شما در حال ساخت است، لطفاً چند لحظه صبر کنید.")
         return
     if not claim_test(user_id):  # علامت‌گذاری اتمیک قبل از ساخت
         await update.message.reply_text("❌ شما قبلاً اکانت تست گرفته‌اید. هر کاربر فقط یک بار می‌تواند تست بگیرد.")
         return
-    await update.message.reply_text("⏳ در حال ساخت اکانت تست...")
-    username = f"test_{user_id}_{secrets.token_hex(2)}"
-    ok, result = await panel_create_user(username, gb=0.1, days=1)
-    if ok:
-        try:
-            add_service(user_id, username, "اکانت تست", 0.1, 1, result)
-        except Exception as e:
-            logger.error(f"ثبت تست: {e}")
-        try:
-            await send_service_to_user(context.bot, user_id, username, result, 1, 0.1)
-        except Exception as e:
-            logger.error(f"ارسال تست: {e}")
-            await update.message.reply_text(f"اکانت تست ساخته شد:\n<code>{esc(result)}</code>", parse_mode=HTML)
-    else:
-        unclaim_test(user_id)  # شکست خورد، حق تست برگردد
-        await update.message.reply_text(
-            f"❌ متاسفانه مشکلی پیش اومد. چند دقیقه دیگه دوباره امتحان کن یا با پشتیبانی تماس بگیر: {SUPPORT}")
-        logger.error(f"خطای ساخت تست: {result}")
-        await notify_admin(context.bot, f"⚠️ خطا در ساخت تست برای {user_id}:\n{result}")
+    _TEST_BUSY.add(user_id)
+    try:
+        await update.message.reply_text("⏳ در حال ساخت اکانت تست...")
+        username = f"test_{user_id}_{secrets.token_hex(2)}"
+        ok, result = await panel_create_user(username, gb=0.1, days=1)
+        if ok:
+            try:
+                add_service(user_id, username, "اکانت تست", 0.1, 1, result)
+            except Exception as e:
+                logger.error(f"ثبت تست: {e}")
+            try:
+                await send_service_to_user(context.bot, user_id, username, result, 1, 0.1)
+            except Exception as e:
+                logger.error(f"ارسال تست: {e}")
+                await update.message.reply_text(f"اکانت تست ساخته شد:\n<code>{esc(result)}</code>", parse_mode=HTML)
+        else:
+            unclaim_test(user_id)  # شکست خورد، حق تست برگردد
+            await update.message.reply_text(
+                f"❌ متاسفانه مشکلی پیش اومد. چند دقیقه دیگه دوباره امتحان کن یا با پشتیبانی تماس بگیر: {SUPPORT}")
+            logger.error(f"خطای ساخت تست: {result}")
+            await notify_admin(context.bot, f"⚠️ خطا در ساخت تست برای {user_id}:\n{result}")
+    finally:
+        _TEST_BUSY.discard(user_id)
 
 
 async def show_order_confirm(q, order):
