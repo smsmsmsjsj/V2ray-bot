@@ -1,3 +1,5 @@
+# requirements: python-telegram-bot==22.* httpx qrcode[pil]
+# اختیاری: فایل .env کنار bot.py با خطوط KEY=VALUE
 import asyncio
 import html
 import logging
@@ -21,11 +23,27 @@ from telegram.error import RetryAfter, NetworkError, BadRequest, Conflict
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           MessageHandler, PicklePersistence, filters, ContextTypes)
 
+
+# ============================== .env ==============================
+def load_dotenv():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(p):
+        return
+    with open(p, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+load_dotenv()
+
 # ============================== لاگ ==============================
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-# جلوگیری از چاپ آدرس‌های حاوی توکن در لاگ
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
@@ -50,14 +68,16 @@ PANEL_API_KEY = env_required("PANEL_API_KEY")
 PANEL_GROUP_NAME = os.environ.get("PANEL_GROUP_ID", "group1")
 BRAND = os.environ.get("BRAND_NAME", "SpeedUR")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
-PORT = os.environ.get("PORT")  # فقط اگر روی Render و مشابه اجرا می‌کنی
+PORT = os.environ.get("PORT")
 REFERRAL_PERCENT = int(os.environ.get("REFERRAL_PERCENT", "5"))
 
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bot.db")
 PERSIST_PATH = os.path.join(DATA_DIR, "bot_state.pickle")
 
-RECEIPT_TTL = 24 * 3600  # اعتبار سفارش منتظر رسید
+RECEIPT_TTL = 24 * 3600
+REMIND_DAYS = 3
+REMIND_USAGE = 0.9
 
 # ============================== تعرفه ==============================
 DURATIONS = {
@@ -93,10 +113,11 @@ BTN_CREDIT = "💰 اعتبار من"
 BTN_INVITE = "👥 معرفی به دوستان"
 BTN_SUPPORT = "🧑‍💻 تماس با پشتیبانی"
 BTN_AGENT = "🤝 درخواست نمایندگی"
+BTN_ORDERS = "🧾 سفارش‌های من"
 BTN_CANCEL_RECEIPT = "❌ لغو ارسال رسید و بازگشت"
 
 MENU_BUTTONS = {BTN_NEW, BTN_TEST, BTN_RENEW, BTN_MY, BTN_HELP, BTN_CREDIT,
-                BTN_INVITE, BTN_SUPPORT, BTN_AGENT, BTN_CANCEL_RECEIPT}
+                BTN_INVITE, BTN_SUPPORT, BTN_AGENT, BTN_ORDERS, BTN_CANCEL_RECEIPT}
 
 SUPPORT_TEXT = ("لطفا در قالب یک پیام درخواست و نکات قابل ملاحظه درباره خود را ارسال کرده "
                 "و سپس تا تماس از طرف ادمین منتظر بمانید")
@@ -130,9 +151,14 @@ HELP_TEXTS = {
 
 STATUS_ICON = {"active": "🟢", "disabled": "🔴", "expired": "⚫️",
                "limited": "🟠", "on_hold": "🟡"}
+ORDER_STATUS_FA = {"awaiting_receipt": "منتظر رسید", "pending": "در انتظار بررسی",
+                   "processing": "در حال انجام", "done": "✅ انجام شد", "rejected": "❌ رد شد",
+                   "cancelled": "لغو شد", "expired": "منقضی", "failed": "ناموفق"}
+KIND_FA = {"credit": "شارژ کیف پول", "new": "خرید سرویس جدید", "renew": "تمدید سرویس"}
 
 USERNAME_RE = re.compile(r"^[a-z0-9_]{3,20}$")
 HTML = ParseMode.HTML
+TEST_TITLE = "اکانت تست"
 
 
 # ============================== ابزارهای کوچک ==============================
@@ -159,9 +185,8 @@ _LAST = {}
 
 
 def throttled(user_id, key, seconds) -> bool:
-    """True یعنی خیلی زود تکرار شده."""
     now = time.time()
-    if len(_LAST) > 5000:  # جلوگیری از رشد بی‌نهایت حافظه
+    if len(_LAST) > 5000:
         for k in [k for k, v in _LAST.items() if now - v > 3600]:
             _LAST.pop(k, None)
     k = (user_id, key)
@@ -205,7 +230,8 @@ async def notify_admin(bot, text):
 # ============================== دیتابیس (SQLite) ==============================
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
-    user_id INTEGER PRIMARY KEY, joined_at TEXT NOT NULL, test_used INTEGER NOT NULL DEFAULT 0);
+    user_id INTEGER PRIMARY KEY, joined_at TEXT NOT NULL, test_used INTEGER NOT NULL DEFAULT 0,
+    banned INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS balances(
     user_id INTEGER PRIMARY KEY, balance INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS services(
@@ -216,6 +242,7 @@ CREATE TABLE IF NOT EXISTS orders(
     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL,
     amount INTEGER NOT NULL, dk TEXT, vk TEXT, username TEXT, discount_code TEXT,
     method TEXT NOT NULL DEFAULT 'card', status TEXT NOT NULL, receipt_uid TEXT, created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
 CREATE TABLE IF NOT EXISTS referrals(
     referred_id INTEGER PRIMARY KEY, referrer_id INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS discounts(
@@ -223,6 +250,10 @@ CREATE TABLE IF NOT EXISTS discounts(
     used INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS gifts(
     code TEXT PRIMARY KEY, amount INTEGER NOT NULL, used_by INTEGER);
+CREATE TABLE IF NOT EXISTS settings(
+    key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS notified(
+    username TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(username, kind));
 """
 
 
@@ -244,6 +275,22 @@ def init_db():
     with conn() as c:
         c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA)
+        cols = [r["name"] for r in c.execute("PRAGMA table_info(users)")]
+        if "banned" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
+
+
+# ---- تنظیمات ----
+def get_setting(key, default=""):
+    with conn() as c:
+        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def set_setting(key, value):
+    with conn() as c:
+        c.execute("INSERT INTO settings(key,value) VALUES(?,?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
 
 # ---- کاربران ----
@@ -261,7 +308,19 @@ def get_join_date(uid) -> str:
 
 def all_user_ids():
     with conn() as c:
-        return [r["user_id"] for r in c.execute("SELECT user_id FROM users")]
+        return [r["user_id"] for r in c.execute("SELECT user_id FROM users WHERE banned=0")]
+
+
+def is_banned(uid) -> bool:
+    with conn() as c:
+        r = c.execute("SELECT banned FROM users WHERE user_id=?", (uid,)).fetchone()
+    return bool(r and r["banned"])
+
+
+def set_ban(uid, val: bool):
+    with conn() as c:
+        c.execute("INSERT OR IGNORE INTO users(user_id, joined_at) VALUES(?,?)", (uid, now_str()))
+        c.execute("UPDATE users SET banned=? WHERE user_id=?", (1 if val else 0, uid))
 
 
 def claim_test(uid) -> bool:
@@ -308,8 +367,12 @@ def user_services(uid):
         return c.execute("SELECT * FROM services WHERE user_id=? ORDER BY id", (uid,)).fetchall()
 
 
+def all_services():
+    with conn() as c:
+        return c.execute("SELECT * FROM services WHERE title!=?", (TEST_TITLE,)).fetchall()
+
+
 def find_service(uname, uid):
-    """فقط اگر سرویس مال همین کاربر باشد برمی‌گرداند."""
     with conn() as c:
         return c.execute("SELECT * FROM services WHERE username=? AND user_id=?", (uname, uid)).fetchone()
 
@@ -322,6 +385,22 @@ def username_taken_local(uname) -> bool:
 def update_service_link(uname, link):
     with conn() as c:
         c.execute("UPDATE services SET link=? WHERE username=?", (link, uname))
+
+
+# ---- یادآوری‌ها ----
+def was_notified(uname, kind) -> bool:
+    with conn() as c:
+        return c.execute("SELECT 1 FROM notified WHERE username=? AND kind=?", (uname, kind)).fetchone() is not None
+
+
+def mark_notified(uname, kind):
+    with conn() as c:
+        c.execute("INSERT OR IGNORE INTO notified(username, kind) VALUES(?,?)", (uname, kind))
+
+
+def clear_notified(uname):
+    with conn() as c:
+        c.execute("DELETE FROM notified WHERE username=?", (uname,))
 
 
 # ---- سفارش‌ها ----
@@ -338,6 +417,12 @@ def create_order(uid, kind, amount, dk=None, vk=None, username=None,
 def get_order(oid):
     with conn() as c:
         return c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+
+
+def user_orders(uid, limit=10):
+    with conn() as c:
+        return c.execute("SELECT * FROM orders WHERE user_id=? AND status NOT IN ('cancelled','expired') "
+                         "ORDER BY id DESC LIMIT ?", (uid, limit)).fetchall()
 
 
 def claim_order(oid, from_status, to_status) -> bool:
@@ -359,7 +444,6 @@ def attach_receipt(oid, uid, file_uid) -> bool:
 
 
 def revert_receipt(oid):
-    """اگر ارسال رسید به ادمین شکست خورد، سفارش به حالت قبل برگردد و رسید آزاد شود."""
     with conn() as c:
         c.execute("UPDATE orders SET status='awaiting_receipt', receipt_uid=NULL "
                   "WHERE id=? AND status='pending'", (oid,))
@@ -371,7 +455,6 @@ def receipt_used_before(file_uid) -> bool:
 
 
 def cancel_awaiting(oid):
-    """سفارشِ منتظر رسید را لغو و کد تخفیفش را آزاد می‌کند."""
     if not oid:
         return
     o = get_order(oid)
@@ -485,7 +568,6 @@ def parse_expire(v):
 
 
 def quota_valid(info: dict) -> bool:
-    """آیا زمان و حجم سرویس هنوز باقی مانده؟"""
     now = time.time()
     expire = parse_expire(info.get("expire"))
     limit = int(info.get("data_limit") or 0)
@@ -512,11 +594,9 @@ async def get_group_ids():
                 if str(g.get("name", "")).lower() == str(PANEL_GROUP_NAME).lower():
                     _GROUP_CACHE["ids"] = [g["id"]]
                     return _GROUP_CACHE["ids"]
-        # پنل جواب داد ولی گروه پیدا نشد → نسخه جایگزین (کش می‌شود)
         _GROUP_CACHE["ids"] = _fallback_groups()
         return _GROUP_CACHE["ids"]
     except Exception as e:
-        # خطای موقت شبکه: کش نکن تا دفعه بعد دوباره تلاش شود
         logger.warning(f"خطا در گرفتن گروه‌ها: {e}")
         return _fallback_groups()
 
@@ -532,7 +612,6 @@ async def panel_get_user(username):
 
 
 async def panel_user_exists(username):
-    """True / False / None (نامشخص)"""
     try:
         r = await panel("GET", f"/api/user/{username}")
         if r.status_code == 200:
@@ -571,7 +650,7 @@ async def panel_create_user(username: str, gb: float, days: int):
             info = await panel_get_user(username)
             link = sub_url(info) if info else ""
         if not link:
-            await panel_delete_user(username)  # جلوگیری از کاربر یتیم در پنل
+            await panel_delete_user(username)
             return False, "کاربر ساخته شد ولی لینک اشتراک برنگشت (کاربر حذف شد)."
         return True, link
     except Exception as e:
@@ -585,8 +664,6 @@ async def panel_renew(username: str, gb: float, days: int):
     now = time.time()
     expire = parse_expire(info.get("expire"))
     limit = int(info.get("data_limit") or 0)
-    # سرویسِ متوقف‌شده (disabled) که هنوز زمان/حجم دارد هم «فعال» حساب می‌شود
-    # تا باقیمانده نسوزد (مطابق FAQ)
     active = info.get("status") in ("active", "disabled", "on_hold") and quota_valid(info)
     add_bytes = int(gb * 1024 ** 3)
     try:
@@ -594,7 +671,7 @@ async def panel_renew(username: str, gb: float, days: int):
             new_expire = int((expire or now) + days * 86400)
             new_limit = (limit + add_bytes) if limit else add_bytes
         else:
-            await panel("POST", f"/api/user/{username}/reset")  # صفر کردن مصرف
+            await panel("POST", f"/api/user/{username}/reset")
             new_expire = int(now + days * 86400)
             new_limit = add_bytes
         resp = await panel("PUT", f"/api/user/{username}",
@@ -615,7 +692,6 @@ async def panel_change_status(username: str, status: str) -> bool:
 
 
 async def panel_revoke_sub(username: str) -> str:
-    """ساخت لینک اشتراک جدید (نه ریست مصرف)."""
     try:
         resp = await panel("POST", f"/api/user/{username}/revoke_sub")
         if resp.status_code in (200, 201):
@@ -625,7 +701,7 @@ async def panel_revoke_sub(username: str) -> str:
     return ""
 
 
-# ============================== عضویت کانال ==============================
+# ============================== عضویت کانال و دسترسی ==============================
 _JOIN_CACHE = {}
 _JOIN_ALERT = {"t": 0.0}
 
@@ -643,7 +719,6 @@ async def is_member(bot, user_id) -> bool:
             _JOIN_CACHE[user_id] = now
         return ok
     except Exception as e:
-        # اگر ربات ادمین کانال نباشد، کاربران بلاک نشوند (fail-open) و ادمین خبردار شود
         logger.warning(f"خطا در بررسی عضویت: {e}")
         if now - _JOIN_ALERT["t"] > 3600:
             _JOIN_ALERT["t"] = now
@@ -659,22 +734,43 @@ def join_keyboard():
 
 
 JOIN_TEXT = "برای استفاده از بات، اول باید تو کانال ما عضو بشی 👇"
+BANNED_TEXT = "⛔️ دسترسی شما به ربات مسدود شده است."
+MAINT_TEXT = "🛠 ربات در حال بروزرسانی است. لطفاً کمی بعد دوباره تلاش کنید."
+
+
+def _target(update):
+    return update.message or (update.callback_query.message if update.callback_query else None)
 
 
 async def require_join(update, context, user_id) -> bool:
-    """True یعنی کاربر عضو نیست و پیام عضویت فرستاده شد."""
     if user_id == ADMIN_ID or await is_member(context.bot, user_id):
         return False
-    target = update.message or (update.callback_query.message if update.callback_query else None)
-    if target:
-        await target.reply_text(JOIN_TEXT, reply_markup=join_keyboard())
+    t = _target(update)
+    if t:
+        await t.reply_text(JOIN_TEXT, reply_markup=join_keyboard())
     return True
+
+
+async def gate(update, context, user_id) -> bool:
+    """True یعنی کاربر نباید ادامه دهد (پیام لازم فرستاده شده)."""
+    if user_id == ADMIN_ID:
+        return False
+    t = _target(update)
+    if is_banned(user_id):
+        if t:
+            await t.reply_text(BANNED_TEXT)
+        return True
+    if get_setting("maintenance") == "1":
+        if t:
+            await t.reply_text(MAINT_TEXT)
+        return True
+    return await require_join(update, context, user_id)
 
 
 # ============================== کیبوردها و متن‌ها ==============================
 def main_keyboard():
     return ReplyKeyboardMarkup([
-        [BTN_NEW], [BTN_TEST, BTN_RENEW], [BTN_MY],
+        [BTN_NEW], [BTN_TEST, BTN_RENEW], [BTN_MY, BTN_ORDERS],
         [BTN_HELP, BTN_CREDIT], [BTN_INVITE, BTN_SUPPORT], [BTN_AGENT],
     ], resize_keyboard=True)
 
@@ -725,7 +821,6 @@ def support_kb():
 
 
 async def services_kb(uid, prefix):
-    """لیست سرویس‌ها با وضعیت واقعی (زنده از پنل)."""
     svcs = user_services(uid)
     infos = await asyncio.gather(*(panel_get_user(s["username"]) for s in svcs))
     rows = []
@@ -824,7 +919,6 @@ def service_view(svc, info):
         f"📦 نوع اشتراک: {esc(svc['title'])}{usage}\n\n"
         f"🔗 لینک اشتراک:\n<code>{esc(svc['link'])}</code>"
     )
-    # دکمه توقف/فعالسازی فقط برای وضعیت active و disabled
     second_row = []
     if st == "active":
         second_row.append(InlineKeyboardButton("⏹ توقف سرویس", callback_data=f"stop_{uname}"))
@@ -859,7 +953,6 @@ async def send_service_to_user(bot, user_id, username, link, days, gb, renewed=F
 
 
 def clear_flow(context):
-    # اگر سفارش منتظر رسید رها شد، لغو و کد تخفیفش آزاد شود
     cancel_awaiting(context.user_data.get("order_id"))
     for k in ("state", "order", "order_id"):
         context.user_data.pop(k, None)
@@ -879,7 +972,6 @@ async def reward_referrer(bot, buyer_id, amount):
 
 
 async def fulfill_order(bot, oid):
-    """سفارشی که وضعیتش 'processing' است را اجرا می‌کند. -> (ok, error)"""
     o = get_order(oid)
     uid = o["user_id"]
 
@@ -904,7 +996,7 @@ async def fulfill_order(bot, oid):
         except Exception as e:
             logger.error(f"ثبت سرویس در دیتابیس ناموفق: {e}")
             await notify_admin(bot, f"⚠️ سرویس {username} در پنل ساخته شد ولی در دیتابیس ثبت نشد:\n{e}")
-    else:  # renew
+    else:
         ok, res = await panel_renew(username, gb, days)
         if not ok:
             return False, res
@@ -912,6 +1004,7 @@ async def fulfill_order(bot, oid):
         link = res or (svc["link"] if svc else "")
         if res and svc:
             update_service_link(username, res)
+        clear_notified(username)
 
     set_order_status(oid, "done")
     await reward_referrer(bot, uid, o["amount"])
@@ -955,7 +1048,6 @@ async def handle_admin_decision(update, context, data):
                         f"❌ متاسفانه رسید شما تایید نشد. لطفاً با پشتیبانی تماس بگیرید: {SUPPORT}")
         return
 
-    # تایید: ابتدا قفل اتمیک
     if not claim_order(oid, "pending", "processing"):
         await ack(q, "این سفارش قبلاً بررسی شده یا در حال پردازش است.", True)
         return
@@ -966,7 +1058,7 @@ async def handle_admin_decision(update, context, data):
         ok, err = False, f"استثنا: {e}"
         logger.exception("fulfill_order")
     if not ok:
-        claim_order(oid, "processing", "pending")  # دوباره قابل تایید
+        claim_order(oid, "processing", "pending")
         await notify_admin(context.bot, f"⚠️ انجام سفارش #{oid} ناموفق بود:\n{err}\n\n"
                                         f"بعد از رفع مشکل دوباره روی ✅ همان رسید بزن.")
         return
@@ -990,7 +1082,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if referrer_id and referrer_id != user_id:
             add_referral(referrer_id, user_id)
 
-    if await require_join(update, context, user_id):
+    if await gate(update, context, user_id):
         return
     await update.message.reply_text(WELCOME, reply_markup=main_keyboard())
 
@@ -999,7 +1091,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     add_user(user_id)
-    if await require_join(update, context, user_id):
+    if await gate(update, context, user_id):
         return
 
     text = (update.message.text or "").strip()
@@ -1122,6 +1214,18 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=await services_kb(user_id, "serv_"))
         return
 
+    if text == BTN_ORDERS:
+        rows = user_orders(user_id)
+        if not rows:
+            await update.message.reply_text("🧾 هنوز سفارشی ثبت نکرده‌اید.", reply_markup=main_keyboard())
+            return
+        lines = ["🧾 <b>آخرین سفارش‌های شما:</b>\n"]
+        for r in rows:
+            lines.append(f"#{r['id']} | {KIND_FA.get(r['kind'], r['kind'])} | {fmt(r['amount'])} تومان | "
+                         f"{ORDER_STATUS_FA.get(r['status'], r['status'])}")
+        await update.message.reply_text("\n".join(lines), parse_mode=HTML, reply_markup=main_keyboard())
+        return
+
     if text == BTN_CREDIT:
         credit_text = (
             "👤 <b>اطلاعات حساب کاربری شما:</b>\n\n"
@@ -1170,11 +1274,10 @@ _TEST_BUSY = set()
 
 async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # اگر همین الان در حال ساخت تست برای این کاربر هستیم، سریع جواب بده (بدون سکوت)
     if user_id in _TEST_BUSY:
         await update.message.reply_text("⏳ اکانت تست شما در حال ساخت است، لطفاً چند لحظه صبر کنید.")
         return
-    if not claim_test(user_id):  # علامت‌گذاری اتمیک قبل از ساخت
+    if not claim_test(user_id):
         await update.message.reply_text("❌ شما قبلاً اکانت تست گرفته‌اید. هر کاربر فقط یک بار می‌تواند تست بگیرد.")
         return
     _TEST_BUSY.add(user_id)
@@ -1184,7 +1287,7 @@ async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         ok, result = await panel_create_user(username, gb=0.1, days=1)
         if ok:
             try:
-                add_service(user_id, username, "اکانت تست", 0.1, 1, result)
+                add_service(user_id, username, TEST_TITLE, 0.1, 1, result)
             except Exception as e:
                 logger.error(f"ثبت تست: {e}")
             try:
@@ -1193,7 +1296,7 @@ async def handle_test_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.error(f"ارسال تست: {e}")
                 await update.message.reply_text(f"اکانت تست ساخته شد:\n<code>{esc(result)}</code>", parse_mode=HTML)
         else:
-            unclaim_test(user_id)  # شکست خورد، حق تست برگردد
+            unclaim_test(user_id)
             await update.message.reply_text(
                 f"❌ متاسفانه مشکلی پیش اومد. چند دقیقه دیگه دوباره امتحان کن یا با پشتیبانی تماس بگیر: {SUPPORT}")
             logger.error(f"خطای ساخت تست: {result}")
@@ -1221,6 +1324,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "check_join":
+        if user_id != ADMIN_ID and is_banned(user_id):
+            await ack(q, BANNED_TEXT, True)
+            return
         if await is_member(context.bot, user_id):
             await ack(q)
             try:
@@ -1232,9 +1338,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ack(q, "هنوز عضو نشدی! اول عضو کانال شو.", True)
         return
 
-    if user_id != ADMIN_ID and not await is_member(context.bot, user_id):
-        await ack(q, "اول باید عضو کانال شوید.", True)
-        await q.message.reply_text(JOIN_TEXT, reply_markup=join_keyboard())
+    if await gate(update, context, user_id):
+        await ack(q)
         return
 
     # ---------- شاخه‌هایی که خودشان answer می‌دهند ----------
@@ -1323,8 +1428,12 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("order_id", None)
         context.user_data["order"] = {"kind": "renew", "username": svc["username"]}
         context.user_data.pop("state", None)
-        await q.edit_message_text(f"♻️ تمدید سرویس <code>{esc(svc['username'])}</code>\n\n⏳ انتخاب مدت زمان:",
-                                  parse_mode=HTML, reply_markup=duration_menu())
+        text = f"♻️ تمدید سرویس <code>{esc(svc['username'])}</code>\n\n⏳ انتخاب مدت زمان:"
+        try:
+            await q.edit_message_text(text, parse_mode=HTML, reply_markup=duration_menu())
+        except BadRequest:
+            await context.bot.send_message(chat_id=user_id, text=text, parse_mode=HTML,
+                                           reply_markup=duration_menu())
         return
 
     if data in ("paycard", "paywallet"):
@@ -1337,7 +1446,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         amount = final_price(order)
 
-        # کلیک تکراری روی کارت‌به‌کارت: همان سفارش قبلی دوباره نشان داده شود (کد تخفیف دوباره مصرف نشود)
         if data == "paycard" and order.get("oid"):
             prev = get_order(order["oid"])
             if (prev and prev["user_id"] == user_id and prev["status"] == "awaiting_receipt"
@@ -1352,7 +1460,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ack(q, "این نام کاربری در این فاصله گرفته شد. دوباره از منو شروع کن.", True)
             return
 
-        # سفارش منتظر رسیدِ قبلی (اگر هست) لغو شود
         cancel_awaiting(context.user_data.get("order_id"))
         context.user_data.pop("order_id", None)
 
@@ -1374,7 +1481,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(pay_text(amount), parse_mode=HTML, reply_markup=pay_markup(amount))
             return
 
-        # پرداخت با کیف پول
         if not try_deduct(user_id, amount):
             release_discount(code)
             await ack(q, f"موجودی کافی نیست.\nموجودی شما: {fmt(get_balance(user_id))} تومان", True)
@@ -1384,7 +1490,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                order["username"], code, "wallet", "processing")
         except Exception:
             logger.exception("create_order wallet")
-            add_balance(user_id, amount)  # بازگشت پول
+            add_balance(user_id, amount)
             release_discount(code)
             await ack(q, "❌ خطای داخلی؛ مبلغ برگشت داده شد. دوباره تلاش کنید.", True)
             return
@@ -1403,7 +1509,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=user_id, text="✅ پرداخت از موجودی انجام شد.",
                                            reply_markup=main_keyboard())
         else:
-            add_balance(user_id, amount)  # بازگشت پول
+            add_balance(user_id, amount)
             release_discount(code)
             set_order_status(oid, "failed")
             await notify_admin(context.bot, f"⚠️ سفارش کیف پول #{oid} کاربر {user_id} ناموفق بود (پول برگشت داده شد):\n{err}")
@@ -1556,7 +1662,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if await require_join(update, context, user.id):
+    if await gate(update, context, user.id):
         return
     oid = context.user_data.get("order_id")
     o = get_order(oid) if oid else None
@@ -1587,10 +1693,9 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_flow(context)
         return
 
-    kind_map = {"credit": "شارژ کیف پول", "new": "خرید سرویس جدید", "renew": "تمدید سرویس"}
     uname_txt = f"@{user.username}" if user.username else "بدون یوزرنیم"
     caption = (f"🧾 رسید جدید | سفارش #{oid}\n\n"
-               f"📌 نوع: {kind_map.get(o['kind'], o['kind'])}\n"
+               f"📌 نوع: {KIND_FA.get(o['kind'], o['kind'])}\n"
                f"👤 کاربر: {user.full_name} ({uname_txt})\n🆔 آیدی: {user.id}\n")
     if o["kind"] != "credit":
         title, _ = DURATIONS[o["dk"]]
@@ -1609,10 +1714,11 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                              reply_markup=admin_keyboard(oid))
     except Exception as e:
         logger.error(f"ارسال رسید به ادمین ناموفق: {e}")
-        revert_receipt(oid)  # وضعیت + رسید آزاد شود تا کاربر بتواند دوباره بفرستد
+        revert_receipt(oid)
         await msg.reply_text("❌ ارسال رسید به مدیریت ناموفق بود. چند دقیقه بعد دوباره تلاش کنید.")
         return
 
+    # سفارش اکنون در انتظار ادمین است؛ clear_flow آن را لغو نمی‌کند چون وضعیتش pending است
     clear_flow(context)
     await msg.reply_text(
         "✅ رسید پرداخت شما دریافت شد. پس از بررسی توسط ادمین به درخواست شما رسیدگی می گردد. "
@@ -1620,18 +1726,38 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================== دستورات ادمین ==============================
+async def cmd_adminhelp(update, context):
+    await update.message.reply_text(
+        "🛠 دستورات ادمین:\n\n"
+        "/stats — آمار\n/orders — سفارش‌های باز\n"
+        "/userinfo ID — اطلاعات کاربر\n"
+        "/addbalance ID AMOUNT — افزایش موجودی\n"
+        "/ban ID — مسدود کردن\n/unban ID — رفع مسدودی\n"
+        "/maintenance on|off — حالت تعمیر\n"
+        "/adddiscount CODE PERCENT [MAX]\n/discounts — لیست کدها\n/deldiscount CODE\n"
+        "/addgift CODE AMOUNT\n/broadcast متن (یا ریپلای)\n"
+        "/panelcheck — بررسی اتصال پنل\n/backup — بکاپ فوری")
+
+
 async def cmd_stats(update, context):
     with conn() as c:
         users = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
+        banned = c.execute("SELECT COUNT(*) n FROM users WHERE banned=1").fetchone()["n"]
         svcs = c.execute("SELECT COUNT(*) n FROM services").fetchone()["n"]
         pend = c.execute("SELECT COUNT(*) n FROM orders WHERE status IN ('pending','processing')").fetchone()["n"]
         rev = c.execute("SELECT COALESCE(SUM(amount),0) s FROM orders WHERE status='done' "
                         "AND method='card' AND kind!='credit'").fetchone()["s"]
+        wal = c.execute("SELECT COALESCE(SUM(amount),0) s FROM orders WHERE status='done' "
+                        "AND method='wallet'").fetchone()["s"]
         cred = c.execute("SELECT COALESCE(SUM(amount),0) s FROM orders WHERE status='done' "
                          "AND kind='credit'").fetchone()["s"]
+        today = datetime.now().strftime("%Y/%m/%d")
+        new_today = c.execute("SELECT COUNT(*) n FROM users WHERE joined_at LIKE ?", (today + "%",)).fetchone()["n"]
     await update.message.reply_text(
-        f"📊 آمار\n\n👥 کاربران: {users}\n📦 سرویس‌ها: {svcs}\n🕓 سفارش‌های باز: {pend}\n"
-        f"💳 فروش کارت‌به‌کارت: {fmt(rev)} تومان\n💰 شارژ کیف پول: {fmt(cred)} تومان")
+        f"📊 آمار\n\n👥 کاربران: {users} (امروز: {new_today} | مسدود: {banned})\n"
+        f"📦 سرویس‌ها: {svcs}\n🕓 سفارش‌های باز: {pend}\n"
+        f"💳 فروش کارت‌به‌کارت: {fmt(rev)} تومان\n💰 فروش از کیف پول: {fmt(wal)} تومان\n"
+        f"🏦 شارژ کیف پول: {fmt(cred)} تومان")
 
 
 async def cmd_orders(update, context):
@@ -1645,6 +1771,21 @@ async def cmd_orders(update, context):
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_userinfo(update, context):
+    try:
+        uid = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("استفاده: /userinfo user_id")
+        return
+    svcs = user_services(uid)
+    lines = [f"🆔 {uid}", f"📅 ورود: {get_join_date(uid)}", f"💰 موجودی: {fmt(get_balance(uid))}",
+             f"⛔️ مسدود: {'بله' if is_banned(uid) else 'خیر'}",
+             f"👥 دعوت‌ها: {referral_count(uid)}", f"📦 سرویس‌ها: {len(svcs)}"]
+    for s in svcs:
+        lines.append(f" • {s['username']} ({s['title']})")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_addbalance(update, context):
     try:
         uid, amount = int(context.args[0]), int(context.args[1])
@@ -1654,6 +1795,37 @@ async def cmd_addbalance(update, context):
     add_balance(uid, amount)
     await update.message.reply_text(f"✅ انجام شد. موجودی فعلی: {fmt(get_balance(uid))}")
     await safe_send(context.bot, uid, f"💰 {fmt(amount)} تومان به موجودی شما اضافه شد.")
+
+
+async def cmd_ban(update, context):
+    try:
+        uid = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("استفاده: /ban user_id")
+        return
+    if uid == ADMIN_ID:
+        await update.message.reply_text("نمی‌شود ادمین را مسدود کرد.")
+        return
+    set_ban(uid, True)
+    await update.message.reply_text(f"⛔️ کاربر {uid} مسدود شد.")
+
+
+async def cmd_unban(update, context):
+    try:
+        uid = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("استفاده: /unban user_id")
+        return
+    set_ban(uid, False)
+    await update.message.reply_text(f"✅ کاربر {uid} آزاد شد.")
+
+
+async def cmd_maintenance(update, context):
+    if not context.args or context.args[0] not in ("on", "off"):
+        await update.message.reply_text("استفاده: /maintenance on|off")
+        return
+    set_setting("maintenance", "1" if context.args[0] == "on" else "0")
+    await update.message.reply_text("🛠 حالت تعمیر " + ("فعال شد." if context.args[0] == "on" else "غیرفعال شد."))
 
 
 async def cmd_adddiscount(update, context):
@@ -1672,6 +1844,25 @@ async def cmd_adddiscount(update, context):
     await update.message.reply_text(f"✅ کد {code} با {pct}٪ تخفیف ساخته شد.")
 
 
+async def cmd_discounts(update, context):
+    with conn() as c:
+        rows = c.execute("SELECT * FROM discounts ORDER BY rowid DESC LIMIT 50").fetchall()
+    if not rows:
+        await update.message.reply_text("کدی وجود ندارد.")
+        return
+    await update.message.reply_text("\n".join(
+        f"{r['code']} | {r['percent']}٪ | استفاده: {r['used']}/{r['max_uses'] or '∞'}" for r in rows))
+
+
+async def cmd_deldiscount(update, context):
+    if not context.args:
+        await update.message.reply_text("استفاده: /deldiscount CODE")
+        return
+    with conn() as c:
+        cur = c.execute("DELETE FROM discounts WHERE code=?", (context.args[0].upper(),))
+    await update.message.reply_text("✅ حذف شد." if cur.rowcount else "کد پیدا نشد.")
+
+
 async def cmd_addgift(update, context):
     try:
         code, amount = context.args[0].upper(), int(context.args[1])
@@ -1681,6 +1872,23 @@ async def cmd_addgift(update, context):
     with conn() as c:
         c.execute("INSERT OR REPLACE INTO gifts(code, amount, used_by) VALUES(?,?,NULL)", (code, amount))
     await update.message.reply_text(f"✅ کد هدیه {code} به مبلغ {fmt(amount)} ساخته شد.")
+
+
+async def cmd_panelcheck(update, context):
+    try:
+        r = await panel("GET", "/api/groups")
+        await update.message.reply_text(f"🟢 پنل پاسخ داد (کد {r.status_code})")
+    except Exception as e:
+        await update.message.reply_text(f"🔴 اتصال به پنل ناموفق: {e}")
+
+
+async def cmd_backup(update, context):
+    try:
+        path = await asyncio.to_thread(do_backup)
+        with open(path, "rb") as f:
+            await context.bot.send_document(ADMIN_ID, f, caption=f"💾 بکاپ {now_str()}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ بکاپ ناموفق: {e}")
 
 
 async def cmd_broadcast(update, context):
@@ -1709,7 +1917,7 @@ async def cmd_broadcast(update, context):
     await msg.reply_text(f"📣 ارسال شد: {ok} | ناموفق: {fail}")
 
 
-# ============================== بکاپ و سلامت ==============================
+# ============================== بکاپ، یادآوری و سلامت ==============================
 def do_backup() -> str:
     path = os.path.join(DATA_DIR, f"backup_{datetime.now().strftime('%a')}.db")
     src = sqlite3.connect(DB_PATH)
@@ -1734,7 +1942,6 @@ async def backup_loop(app):
 
 
 async def expire_loop():
-    """هر نیم ساعت سفارش‌های منتظر رسیدِ منقضی را بسته و کد تخفیفشان را آزاد می‌کند."""
     while True:
         await asyncio.sleep(1800)
         try:
@@ -1743,6 +1950,45 @@ async def expire_loop():
                 logger.info(f"{n} سفارش منقضی شد")
         except Exception as e:
             logger.error(f"expire_loop: {e}")
+
+
+async def run_reminders(bot):
+    sem = asyncio.Semaphore(5)
+
+    async def one(s):
+        async with sem:
+            uname = s["username"]
+            info = await panel_get_user(uname)
+            if not info or info.get("status") != "active":
+                return
+            now = time.time()
+            exp = parse_expire(info.get("expire"))
+            limit = int(info.get("data_limit") or 0)
+            used = int(info.get("used_traffic") or 0)
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("♻️ تمدید سرویس", callback_data=f"rn_{uname}")]])
+            if exp and 0 < exp - now < REMIND_DAYS * 86400 and not was_notified(uname, "exp"):
+                left = max(int((exp - now) // 86400), 0)
+                if await safe_send(bot, s["user_id"],
+                                   f"⏰ سرویس <code>{esc(uname)}</code> حدود {left} روز دیگر منقضی می‌شود.\n"
+                                   "برای جلوگیری از قطعی، تمدید کنید.", parse_mode=HTML, reply_markup=kb):
+                    mark_notified(uname, "exp")
+            if limit and used / limit >= REMIND_USAGE and not was_notified(uname, "vol"):
+                if await safe_send(bot, s["user_id"],
+                                   f"📉 بیش از {int(REMIND_USAGE * 100)}٪ حجم سرویس <code>{esc(uname)}</code> مصرف شده.\n"
+                                   "برای افزودن حجم، تمدید کنید.", parse_mode=HTML, reply_markup=kb):
+                    mark_notified(uname, "vol")
+
+    await asyncio.gather(*(one(s) for s in all_services()), return_exceptions=True)
+
+
+async def reminder_loop(app):
+    await asyncio.sleep(180)
+    while True:
+        try:
+            await run_reminders(app.bot)
+        except Exception as e:
+            logger.error(f"reminder_loop: {e}")
+        await asyncio.sleep(6 * 3600)
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -1768,14 +2014,13 @@ def run_health_server():
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
     if isinstance(err, Conflict):
-        # نمونه دیگری با همین توکن در حال اجراست؛ فقط در لاگ بنویس، به ادمین پیام نده
         logger.warning("Conflict: نمونه دیگری با همین توکن در حال اجراست")
         return
     logger.error("خطا:", exc_info=err)
     if isinstance(err, NetworkError):
         return
     if isinstance(err, BadRequest) and "not modified" in str(err).lower():
-        return  # ویرایش پیام با متن یکسان؛ خطای واقعی نیست
+        return
     if not throttled(0, "err_notify", 60):
         await notify_admin(context.bot, f"⚠️ خطای ربات: {type(err).__name__}: {err}")
     if isinstance(update, Update) and update.effective_chat:
@@ -1783,7 +2028,6 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
                         "❌ مشکلی پیش آمد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
 
 
-# تسک‌های پس‌زمینه اینجا نگه داشته می‌شوند (نه در bot_data) تا PicklePersistence کرش نکند
 _BG_TASKS = []
 
 
@@ -1792,6 +2036,7 @@ async def post_init(app: Application):
     HTTP = httpx.AsyncClient()
     _BG_TASKS.append(asyncio.create_task(backup_loop(app)))
     _BG_TASKS.append(asyncio.create_task(expire_loop()))
+    _BG_TASKS.append(asyncio.create_task(reminder_loop(app)))
 
 
 async def post_shutdown(app: Application):
@@ -1816,11 +2061,20 @@ def main():
 
     admin_only = filters.User(ADMIN_ID)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("adminhelp", cmd_adminhelp, filters=admin_only))
     app.add_handler(CommandHandler("stats", cmd_stats, filters=admin_only))
     app.add_handler(CommandHandler("orders", cmd_orders, filters=admin_only))
+    app.add_handler(CommandHandler("userinfo", cmd_userinfo, filters=admin_only))
     app.add_handler(CommandHandler("addbalance", cmd_addbalance, filters=admin_only))
+    app.add_handler(CommandHandler("ban", cmd_ban, filters=admin_only))
+    app.add_handler(CommandHandler("unban", cmd_unban, filters=admin_only))
+    app.add_handler(CommandHandler("maintenance", cmd_maintenance, filters=admin_only))
     app.add_handler(CommandHandler("adddiscount", cmd_adddiscount, filters=admin_only))
+    app.add_handler(CommandHandler("discounts", cmd_discounts, filters=admin_only))
+    app.add_handler(CommandHandler("deldiscount", cmd_deldiscount, filters=admin_only))
     app.add_handler(CommandHandler("addgift", cmd_addgift, filters=admin_only))
+    app.add_handler(CommandHandler("panelcheck", cmd_panelcheck, filters=admin_only))
+    app.add_handler(CommandHandler("backup", cmd_backup, filters=admin_only))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast, filters=admin_only))
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, receipt_handler))
@@ -1828,7 +2082,7 @@ def main():
     app.add_error_handler(on_error)
 
     logger.info("بات در حال اجراست...")
-    app.run_polling(bootstrap_retries=-1)  # تلاش مجدد نامحدود موقع استارت (خطای 503 شبکه)
+    app.run_polling(bootstrap_retries=-1)
 
 
 if __name__ == "__main__":
