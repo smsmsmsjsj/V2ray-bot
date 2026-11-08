@@ -1,7 +1,9 @@
 # requirements: python-telegram-bot==22.* httpx qrcode[pil]
 # اختیاری: فایل .env کنار bot.py با خطوط KEY=VALUE
 import asyncio
+import hashlib
 import html
+import json
 import logging
 import os
 import re
@@ -11,8 +13,9 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
+from urllib.parse import urlparse, parse_qs
 
 import httpx
 import qrcode
@@ -58,8 +61,8 @@ def env_required(name: str) -> str:
 
 TOKEN = env_required("BOT_TOKEN")
 ADMIN_ID = int(env_required("ADMIN_ID"))
-CARD_NUMBER = env_required("CARD_NUMBER")
-CARD_OWNER = env_required("CARD_OWNER")
+CARD_NUMBER = os.environ.get("CARD_NUMBER", "6219 8614 9793 7499").strip()
+CARD_OWNER = os.environ.get("CARD_OWNER", "").strip()
 CARD_DIGITS = "".join(c for c in CARD_NUMBER if c.isdigit())
 SUPPORT = env_required("SUPPORT_USERNAME")
 CHANNEL = env_required("CHANNEL_USERNAME")
@@ -70,6 +73,10 @@ BRAND = os.environ.get("BRAND_NAME", "SpeedUR")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = os.environ.get("PORT")
 REFERRAL_PERCENT = int(os.environ.get("REFERRAL_PERCENT", "5"))
+
+# تایید خودکار با پیامک بانک (وب‌هوک)
+SMS_SECRET = os.environ.get("SMS_SECRET", "").strip()
+SMS_SENDERS = [s.strip() for s in os.environ.get("SMS_SENDERS", "").split(",") if s.strip()]
 
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bot.db")
@@ -102,8 +109,6 @@ VOLUMES = {
 }
 
 # ============================ متن‌ها و دکمه‌ها ============================
-WELCOME = "🚀 به فروشگاه v2ray market خوش آمدید\n\nیکی از گزینه‌ها رو انتخاب کن:"
-
 BTN_NEW = "🚀 خرید سرویس جدید"
 BTN_TEST = "🧪 اکانت تست"
 BTN_RENEW = "♻️ تمدید سرویس"
@@ -254,6 +259,8 @@ CREATE TABLE IF NOT EXISTS settings(
     key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS notified(
     username TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(username, kind));
+CREATE TABLE IF NOT EXISTS sms_log(
+    hash TEXT PRIMARY KEY, created_at REAL NOT NULL);
 """
 
 
@@ -298,6 +305,11 @@ def add_user(uid) -> bool:
     with conn() as c:
         cur = c.execute("INSERT OR IGNORE INTO users(user_id, joined_at) VALUES(?,?)", (uid, now_str()))
         return cur.rowcount == 1
+
+
+def count_users() -> int:
+    with conn() as c:
+        return c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
 
 
 def get_join_date(uid) -> str:
@@ -474,6 +486,25 @@ def expire_old_orders() -> int:
             release_discount(o["discount_code"])
             n += 1
     return n
+
+
+def find_open_orders_by_amounts(amounts):
+    """سفارش‌های باز (منتظر رسید/در انتظار بررسی) با مبلغ مطابق پیامک."""
+    if not amounts:
+        return []
+    q = ",".join("?" * len(amounts))
+    cutoff = time.time() - RECEIPT_TTL
+    with conn() as c:
+        return c.execute(
+            f"SELECT * FROM orders WHERE status IN ('awaiting_receipt','pending') "
+            f"AND method='card' AND created_at>=? AND amount IN ({q}) ORDER BY id",
+            (cutoff, *amounts)).fetchall()
+
+
+def sms_register(h) -> bool:
+    with conn() as c:
+        cur = c.execute("INSERT OR IGNORE INTO sms_log(hash, created_at) VALUES(?,?)", (h, time.time()))
+        return cur.rowcount == 1
 
 
 # ---- دعوت ----
@@ -738,6 +769,12 @@ BANNED_TEXT = "⛔️ دسترسی شما به ربات مسدود شده است
 MAINT_TEXT = "🛠 ربات در حال بروزرسانی است. لطفاً کمی بعد دوباره تلاش کنید."
 
 
+def welcome_text() -> str:
+    return ("🚀 به فروشگاه v2ray market خوش آمدید\n\n"
+            f"👥 تعداد کاربران ربات: {fmt(count_users())}\n\n"
+            "یکی از گزینه‌ها رو انتخاب کن:")
+
+
 def _target(update):
     return update.message or (update.callback_query.message if update.callback_query else None)
 
@@ -870,14 +907,16 @@ def confirm_menu(order):
 
 
 def pay_text(amount) -> str:
+    owner = f"\n{esc(CARD_OWNER)}" if CARD_OWNER else ""
     return (
         f"لطفاً مبلغ <b>{fmt(amount)}</b> تومان (<code>{amount * 10}</code> ریال) به کارت زیر واریز نمایید.\n\n"
-        f"<code>{esc(CARD_NUMBER)}</code>\n{esc(CARD_OWNER)}\n\n"
-        "📷 عکس رسید خود را در این مرحله ارسال نمایید.\n\n"
+        f"<code>{esc(CARD_NUMBER)}</code>{owner}\n\n"
+        "✅ پرداخت شما بعد از واریز به‌صورت خودکار شناسایی و تایید می‌شود. "
+        "اگر تا چند دقیقه تایید نشد، عکس رسید را ارسال کنید.\n\n"
         "⚠️ از اپلیکیشن آپ و تاپ با توجه به محدودیت روزانه برای انتقال استفاده نکنید.\n"
         "⚠️ مبلغ را دقیق واریز کنید؛ و از رند کردن آن خودداری فرمایید.\n"
         "⚠️ مبلغی که کپی میکنید ریالی است، توجه کنید.\n\n"
-        "👇 بعد از واریز دکمه ارسال رسید رو بزنید"
+        "👇 اگر خودکار تایید نشد، بعد از واریز دکمه ارسال رسید رو بزنید"
     )
 
 
@@ -1068,8 +1107,135 @@ async def handle_admin_decision(update, context, data):
         pass
 
 
+# ============================== تایید خودکار با پیامک بانک ==============================
+async def process_sms(bot, text: str, sender: str = "") -> str:
+    if SMS_SENDERS and not any(s.lower() in (sender or "").lower() for s in SMS_SENDERS):
+        return "ignored_sender"
+    t = normalize_digits(text or "")
+    if not t.strip():
+        return "empty"
+    if "برداشت" in t and "واریز" not in t:
+        return "ignored_withdraw"
+    if not any(k in t for k in ("واریز", "+", "deposit", "Deposit", "DEPOSIT")):
+        return "ignored"
+
+    h = hashlib.sha256(t.encode("utf-8")).hexdigest()
+    if not sms_register(h):
+        return "duplicate"
+
+    # فقط خط‌های مربوط به واریز، بدون خط موجودی
+    lines = [ln for ln in t.splitlines() if ("واریز" in ln or "+" in ln) and "موجودی" not in ln]
+    source = " ".join(lines) if lines else t
+    nums = []
+    for m in re.findall(r"\d[\d,٬،]*", source):
+        try:
+            n = int(re.sub(r"[,٬،]", "", m))
+        except ValueError:
+            continue
+        if 1000 <= n < 10 ** 10:
+            nums.append(n)
+    cands = set()
+    for n in nums:
+        cands.add(n)               # تومان
+        if n % 10 == 0:
+            cands.add(n // 10)     # ریال -> تومان
+
+    rows = find_open_orders_by_amounts(list(cands))
+    if not rows:
+        await notify_admin(bot, f"ℹ️ پیامک واریز دریافت شد ولی سفارش بازی با این مبلغ پیدا نشد:\n\n{t[:600]}")
+        return "no_match"
+    if len(rows) > 1:
+        pend = [r for r in rows if r["status"] == "pending"]
+        if len(pend) == 1:
+            rows = pend
+    if len(rows) > 1:
+        ids = ", ".join(f"#{r['id']}" for r in rows)
+        await notify_admin(bot, f"⚠️ چند سفارش هم‌مبلغ ({ids}) با پیامک زیر مطابقت دارند؛ دستی تایید کنید:\n\n{t[:600]}")
+        return "ambiguous"
+
+    o = rows[0]
+    oid = o["id"]
+    if not (claim_order(oid, "pending", "processing") or claim_order(oid, "awaiting_receipt", "processing")):
+        return "busy"
+    try:
+        ok, err = await fulfill_order(bot, oid)
+    except Exception as e:
+        ok, err = False, f"استثنا: {e}"
+        logger.exception("sms fulfill")
+    if not ok:
+        claim_order(oid, "processing", "pending")
+        await notify_admin(bot, f"⚠️ تایید خودکار سفارش #{oid} ناموفق بود:\n{err}")
+        return "failed"
+    await notify_admin(bot, f"✅ سفارش #{oid} ({KIND_FA.get(o['kind'], o['kind'])} | {fmt(o['amount'])} تومان | "
+                            f"کاربر {o['user_id']}) با پیامک بانک خودکار تایید شد.")
+    return "ok"
+
+
+_BOT = None
+_LOOP = None
+
+
+class WebHandler(BaseHTTPRequestHandler):
+    def _reply(self, code, body: dict):
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - bot is running")
+
+    def do_POST(self):
+        try:
+            u = urlparse(self.path)
+            if u.path.rstrip("/") != "/sms" or not SMS_SECRET:
+                return self._reply(404, {"ok": False})
+            key = (parse_qs(u.query).get("key") or [""])[0] or self.headers.get("X-Secret", "")
+            if not secrets.compare_digest(key, SMS_SECRET):
+                return self._reply(403, {"ok": False})
+            length = min(int(self.headers.get("Content-Length") or 0), 10000)
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            text, sender = raw, ""
+            try:
+                j = json.loads(raw)
+                if isinstance(j, dict):
+                    text = str(j.get("text") or j.get("message") or j.get("body") or "")
+                    sender = str(j.get("sender") or j.get("from") or "")
+            except ValueError:
+                form = parse_qs(raw)
+                if form.get("text") or form.get("message"):
+                    text = (form.get("text") or form.get("message"))[0]
+                    sender = (form.get("sender") or form.get("from") or [""])[0]
+            if _BOT is None or _LOOP is None:
+                return self._reply(503, {"ok": False})
+            fut = asyncio.run_coroutine_threadsafe(process_sms(_BOT, text, sender), _LOOP)
+            self._reply(200, {"ok": True, "result": fut.result(timeout=90)})
+        except Exception as e:
+            logger.error(f"webhook: {e}")
+            self._reply(500, {"ok": False})
+
+    def log_message(self, format, *args):
+        pass
+
+
+def run_web_server():
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", int(PORT)), WebHandler)
+        logger.info(f"وب‌سرور روی پورت {PORT} فعال شد")
+        server.serve_forever()
+    except OSError as e:
+        logger.warning(f"وب‌سرور اجرا نشد: {e}")
+
+
 # ============================== هندلرها ==============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message:
+        return
     clear_flow(context)
     user_id = update.effective_user.id
     is_new = add_user(user_id)
@@ -1084,11 +1250,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if await gate(update, context, user_id):
         return
-    await update.message.reply_text(WELCOME, reply_markup=main_keyboard())
+    await update.message.reply_text(welcome_text(), reply_markup=main_keyboard())
 
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if not user or not update.message:
+        return
     user_id = user.id
     add_user(user_id)
     if await gate(update, context, user_id):
@@ -1333,7 +1501,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.message.delete()
             except Exception:
                 pass
-            await context.bot.send_message(chat_id=user_id, text=WELCOME, reply_markup=main_keyboard())
+            await context.bot.send_message(chat_id=user_id, text=welcome_text(), reply_markup=main_keyboard())
         else:
             await ack(q, "هنوز عضو نشدی! اول عضو کانال شو.", True)
         return
@@ -1347,7 +1515,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         oid = context.user_data.get("order_id")
         o = get_order(oid) if oid else None
         if not o or o["user_id"] != user_id or o["status"] != "awaiting_receipt":
-            await ack(q, "سفارش منقضی شد. دوباره از منو شروع کن.", True)
+            await ack(q, "سفارش منقضی شد یا قبلاً انجام شده است.", True)
             return
         await ack(q)
         context.user_data["state"] = "waiting_receipt"
@@ -1530,7 +1698,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.delete()
         except Exception:
             pass
-        await context.bot.send_message(chat_id=user_id, text=WELCOME, reply_markup=main_keyboard())
+        await context.bot.send_message(chat_id=user_id, text=welcome_text(), reply_markup=main_keyboard())
         return
 
     if data == "faq":
@@ -1662,6 +1830,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if not user or not update.message:
+        return
     if await gate(update, context, user.id):
         return
     oid = context.user_data.get("order_id")
@@ -1689,7 +1859,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ این رسید قبلاً ارسال شده است.", reply_markup=main_keyboard())
         return
     if not attach_receipt(oid, user.id, f.file_unique_id):
-        await msg.reply_text("این سفارش قبلاً ثبت شده است.", reply_markup=main_keyboard())
+        await msg.reply_text("این سفارش قبلاً ثبت یا انجام شده است.", reply_markup=main_keyboard())
         clear_flow(context)
         return
 
@@ -1711,18 +1881,18 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                          reply_markup=admin_keyboard(oid))
         else:
             await context.bot.send_document(chat_id=ADMIN_ID, document=f.file_id, caption=caption,
-                                             reply_markup=admin_keyboard(oid))
+                                            reply_markup=admin_keyboard(oid))
     except Exception as e:
         logger.error(f"ارسال رسید به ادمین ناموفق: {e}")
         revert_receipt(oid)
         await msg.reply_text("❌ ارسال رسید به مدیریت ناموفق بود. چند دقیقه بعد دوباره تلاش کنید.")
         return
 
-    # سفارش اکنون در انتظار ادمین است؛ clear_flow آن را لغو نمی‌کند چون وضعیتش pending است
     clear_flow(context)
     await msg.reply_text(
-        "✅ رسید پرداخت شما دریافت شد. پس از بررسی توسط ادمین به درخواست شما رسیدگی می گردد. "
-        "لطفا از ارسال مجدد رسید خودداری نمایید.", reply_markup=main_keyboard())
+        "✅ رسید پرداخت شما دریافت شد. اگر پیامک بانک ما را تایید کند، سفارش خودکار انجام می‌شود؛ "
+        "در غیر این صورت پس از بررسی ادمین انجام می‌گردد. لطفا از ارسال مجدد رسید خودداری نمایید.",
+        reply_markup=main_keyboard())
 
 
 # ============================== دستورات ادمین ==============================
@@ -1736,6 +1906,7 @@ async def cmd_adminhelp(update, context):
         "/maintenance on|off — حالت تعمیر\n"
         "/adddiscount CODE PERCENT [MAX]\n/discounts — لیست کدها\n/deldiscount CODE\n"
         "/addgift CODE AMOUNT\n/broadcast متن (یا ریپلای)\n"
+        "/smstest متن پیامک — تست تایید خودکار\n"
         "/panelcheck — بررسی اتصال پنل\n/backup — بکاپ فوری")
 
 
@@ -1874,6 +2045,15 @@ async def cmd_addgift(update, context):
     await update.message.reply_text(f"✅ کد هدیه {code} به مبلغ {fmt(amount)} ساخته شد.")
 
 
+async def cmd_smstest(update, context):
+    parts = (update.message.text or "").split(None, 1)
+    if len(parts) < 2:
+        await update.message.reply_text("استفاده: /smstest متن پیامک بانک")
+        return
+    res = await process_sms(context.bot, parts[1], "")
+    await update.message.reply_text(f"نتیجه: {res}")
+
+
 async def cmd_panelcheck(update, context):
     try:
         r = await panel("GET", "/api/groups")
@@ -1991,26 +2171,6 @@ async def reminder_loop(app):
         await asyncio.sleep(6 * 3600)
 
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK - bot is running")
-
-    def log_message(self, format, *args):
-        pass
-
-
-def run_health_server():
-    try:
-        server = HTTPServer(("0.0.0.0", int(PORT)), HealthHandler)
-        logger.info(f"سرور سلامت روی پورت {PORT} فعال شد")
-        server.serve_forever()
-    except OSError as e:
-        logger.warning(f"سرور سلامت اجرا نشد: {e}")
-
-
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
     if isinstance(err, Conflict):
@@ -2023,7 +2183,7 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not throttled(0, "err_notify", 60):
         await notify_admin(context.bot, f"⚠️ خطای ربات: {type(err).__name__}: {err}")
-    if isinstance(update, Update) and update.effective_chat:
+    if isinstance(update, Update) and update.effective_chat and update.effective_chat.type == "private":
         await safe_send(context.bot, update.effective_chat.id,
                         "❌ مشکلی پیش آمد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
 
@@ -2032,8 +2192,10 @@ _BG_TASKS = []
 
 
 async def post_init(app: Application):
-    global HTTP
+    global HTTP, _BOT, _LOOP
     HTTP = httpx.AsyncClient()
+    _BOT = app.bot
+    _LOOP = asyncio.get_running_loop()
     _BG_TASKS.append(asyncio.create_task(backup_loop(app)))
     _BG_TASKS.append(asyncio.create_task(expire_loop()))
     _BG_TASKS.append(asyncio.create_task(reminder_loop(app)))
@@ -2050,7 +2212,9 @@ async def post_shutdown(app: Application):
 def main():
     init_db()
     if PORT:
-        threading.Thread(target=run_health_server, daemon=True).start()
+        threading.Thread(target=run_web_server, daemon=True).start()
+    if SMS_SECRET and not PORT:
+        logger.warning("SMS_SECRET تنظیم شده ولی PORT نیست؛ وب‌هوک پیامک فعال نمی‌شود.")
 
     persistence = PicklePersistence(filepath=PERSIST_PATH, update_interval=10)
     app = (Application.builder().token(TOKEN)
@@ -2059,8 +2223,9 @@ def main():
            .post_init(post_init).post_shutdown(post_shutdown)
            .build())
 
-    admin_only = filters.User(ADMIN_ID)
-    app.add_handler(CommandHandler("start", start))
+    private = filters.ChatType.PRIVATE
+    admin_only = filters.User(ADMIN_ID) & private
+    app.add_handler(CommandHandler("start", start, filters=private))
     app.add_handler(CommandHandler("adminhelp", cmd_adminhelp, filters=admin_only))
     app.add_handler(CommandHandler("stats", cmd_stats, filters=admin_only))
     app.add_handler(CommandHandler("orders", cmd_orders, filters=admin_only))
@@ -2073,12 +2238,13 @@ def main():
     app.add_handler(CommandHandler("discounts", cmd_discounts, filters=admin_only))
     app.add_handler(CommandHandler("deldiscount", cmd_deldiscount, filters=admin_only))
     app.add_handler(CommandHandler("addgift", cmd_addgift, filters=admin_only))
+    app.add_handler(CommandHandler("smstest", cmd_smstest, filters=admin_only))
     app.add_handler(CommandHandler("panelcheck", cmd_panelcheck, filters=admin_only))
     app.add_handler(CommandHandler("backup", cmd_backup, filters=admin_only))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast, filters=admin_only))
     app.add_handler(CallbackQueryHandler(callback_router))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, receipt_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+    app.add_handler(MessageHandler(private & (filters.PHOTO | filters.Document.IMAGE), receipt_handler))
+    app.add_handler(MessageHandler(private & filters.TEXT & ~filters.COMMAND, text_router))
     app.add_error_handler(on_error)
 
     logger.info("بات در حال اجراست...")
