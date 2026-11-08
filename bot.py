@@ -1,5 +1,7 @@
 # requirements: python-telegram-bot==22.* httpx qrcode[pil]
 # اختیاری: فایل .env کنار bot.py با خطوط KEY=VALUE
+# متغیرها: BOT_TOKEN ADMIN_ID CARD_NUMBER CARD_OWNER SUPPORT_USERNAME CHANNEL_USERNAME
+#          PANEL_URL PANEL_API_KEY PANEL_GROUP_ID SMS_SECRET SMS_SENDERS(اختیاری) PORT(روی Render خودکار)
 import asyncio
 import hashlib
 import html
@@ -61,20 +63,19 @@ def env_required(name: str) -> str:
 
 TOKEN = env_required("BOT_TOKEN")
 ADMIN_ID = int(env_required("ADMIN_ID"))
-CARD_NUMBER = os.environ.get("CARD_NUMBER", "6219 8614 9793 7499").strip()
+CARD_NUMBER = env_required("CARD_NUMBER")
 CARD_OWNER = os.environ.get("CARD_OWNER", "").strip()
-CARD_DIGITS = "".join(c for c in CARD_NUMBER if c.isdigit())
 SUPPORT = env_required("SUPPORT_USERNAME")
 CHANNEL = env_required("CHANNEL_USERNAME")
 PANEL_URL = env_required("PANEL_URL").rstrip("/")
 PANEL_API_KEY = env_required("PANEL_API_KEY")
 PANEL_GROUP_NAME = os.environ.get("PANEL_GROUP_ID", "group1")
 BRAND = os.environ.get("BRAND_NAME", "SpeedUR")
+BRAND_TITLE = os.environ.get("BRAND_TITLE", "v2ray market")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = os.environ.get("PORT")
 REFERRAL_PERCENT = int(os.environ.get("REFERRAL_PERCENT", "5"))
 
-# تایید خودکار با پیامک بانک (وب‌هوک)
 SMS_SECRET = os.environ.get("SMS_SECRET", "").strip()
 SMS_SENDERS = [s.strip() for s in os.environ.get("SMS_SENDERS", "").split(",") if s.strip()]
 
@@ -106,8 +107,7 @@ VOLUMES = {
     "v200": (200, {"d1": 600000, "d2": 650000, "d3": 780000, "d5": 1000000, "d12": 1200000}),
 }
 
-# یکتا کردن قیمت‌ها: اگر دو تعرفه قیمت یکسان داشتند، به بعدی ۵۰۰ تومان اضافه می‌شود
-# تا تایید خودکار با پیامک بانک بتواند هر مبلغ را به یک تعرفه نسبت دهد
+# یکتا کردن قیمت‌ها (برای تایید خودکار با پیامک بانک)
 _seen_prices = set()
 for _vk, (_gb, _prices) in VOLUMES.items():
     for _dk in _prices:
@@ -307,6 +307,18 @@ def set_setting(key, value):
                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
 
+def card_number() -> str:
+    return get_setting("card_number", "") or CARD_NUMBER
+
+
+def card_owner() -> str:
+    return get_setting("card_owner", "") or CARD_OWNER
+
+
+def card_digits() -> str:
+    return "".join(c for c in card_number() if c.isdigit())
+
+
 # ---- کاربران ----
 def add_user(uid) -> bool:
     with conn() as c:
@@ -496,7 +508,6 @@ def expire_old_orders() -> int:
 
 
 def find_open_orders_by_amounts(amounts):
-    """سفارش‌های باز (منتظر رسید/در انتظار بررسی) با مبلغ مطابق پیامک."""
     if not amounts:
         return []
     q = ",".join("?" * len(amounts))
@@ -508,10 +519,14 @@ def find_open_orders_by_amounts(amounts):
             (cutoff, *amounts)).fetchall()
 
 
-def sms_register(h) -> bool:
+def sms_seen(h) -> bool:
     with conn() as c:
-        cur = c.execute("INSERT OR IGNORE INTO sms_log(hash, created_at) VALUES(?,?)", (h, time.time()))
-        return cur.rowcount == 1
+        return c.execute("SELECT 1 FROM sms_log WHERE hash=?", (h,)).fetchone() is not None
+
+
+def sms_register(h):
+    with conn() as c:
+        c.execute("INSERT OR IGNORE INTO sms_log(hash, created_at) VALUES(?,?)", (h, time.time()))
 
 
 # ---- دعوت ----
@@ -572,6 +587,34 @@ def redeem_gift_safe(code: str, uid: int) -> int:
     except Exception as e:
         logger.error(f"redeem_gift: {e}")
         return 0
+
+
+# ---- گزارش فروش ----
+def sales_summary(seconds, title) -> str:
+    since = time.time() - seconds
+    since_s = datetime.fromtimestamp(since).strftime("%Y/%m/%d %H:%M:%S")
+    with conn() as c:
+        s = c.execute("SELECT COUNT(*) n, COALESCE(SUM(amount),0) t FROM orders "
+                      "WHERE status='done' AND created_at>=? AND kind!='credit'", (since,)).fetchone()
+        cr = c.execute("SELECT COUNT(*) n, COALESCE(SUM(amount),0) t FROM orders "
+                       "WHERE status='done' AND created_at>=? AND kind='credit'", (since,)).fetchone()
+        nu = c.execute("SELECT COUNT(*) n FROM users WHERE joined_at>=?", (since_s,)).fetchone()
+        pend = c.execute("SELECT COUNT(*) n FROM orders WHERE status IN ('pending','processing')").fetchone()
+    return (f"📈 {title}\n\n"
+            f"🛒 فروش سرویس: {s['n']} سفارش | {fmt(s['t'])} تومان\n"
+            f"🏦 شارژ کیف پول: {cr['n']} مورد | {fmt(cr['t'])} تومان\n"
+            f"👥 کاربر جدید: {nu['n']}\n"
+            f"🕓 سفارش باز: {pend['n']}")
+
+
+def welcome_text() -> str:
+    try:
+        n = count_users()
+    except Exception:
+        n = 0
+    return (f"🚀 به فروشگاه {BRAND_TITLE} خوش آمدید\n\n"
+            f"👥 تعداد کاربران ربات: {fmt(n)}\n\n"
+            "یکی از گزینه‌ها رو انتخاب کن:")
 
 
 # ============================== پنل ==============================
@@ -776,11 +819,6 @@ BANNED_TEXT = "⛔️ دسترسی شما به ربات مسدود شده است
 MAINT_TEXT = "🛠 ربات در حال بروزرسانی است. لطفاً کمی بعد دوباره تلاش کنید."
 
 
-def welcome_text() -> str:
-    return ("🚀 به فروشگاه v2ray market خوش آمدید\n\n"
-            "یکی از گزینه‌ها رو انتخاب کن:")
-
-
 def _target(update):
     return update.message or (update.callback_query.message if update.callback_query else None)
 
@@ -913,10 +951,10 @@ def confirm_menu(order):
 
 
 def pay_text(amount) -> str:
-    owner = f"\n{esc(CARD_OWNER)}" if CARD_OWNER else ""
+    owner = f"\n{esc(card_owner())}" if card_owner() else ""
     return (
         f"لطفاً مبلغ <b>{fmt(amount)}</b> تومان (<code>{amount * 10}</code> ریال) به کارت زیر واریز نمایید.\n\n"
-        f"<code>{esc(CARD_NUMBER)}</code>{owner}\n\n"
+        f"<code>{esc(card_number())}</code>{owner}\n\n"
         "✅ پرداخت شما بعد از واریز به‌صورت خودکار شناسایی و تایید می‌شود. "
         "اگر تا چند دقیقه تایید نشد، عکس رسید را ارسال کنید.\n\n"
         "⚠️ از اپلیکیشن آپ و تاپ با توجه به محدودیت روزانه برای انتقال استفاده نکنید.\n"
@@ -929,7 +967,7 @@ def pay_text(amount) -> str:
 def pay_markup(amount):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 کپی مبلغ", copy_text=CopyTextButton(text=str(amount * 10))),
-         InlineKeyboardButton("📋 کپی شماره کارت", copy_text=CopyTextButton(text=CARD_DIGITS))],
+         InlineKeyboardButton("📋 کپی شماره کارت", copy_text=CopyTextButton(text=card_digits()))],
         [InlineKeyboardButton("📤 ارسال رسید پرداخت", callback_data="send_receipt")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")],
     ])
@@ -953,6 +991,8 @@ def service_view(svc, info):
         limit = int(info.get("data_limit") or 0)
         exp = parse_expire(info.get("expire"))
         usage = f"\n📊 مصرف: {gb_fmt(used)} / {gb_fmt(limit) if limit else '∞'} گیگابایت"
+        if limit:
+            usage += f"\n📦 باقی‌مانده حجم: {max(float(gb_fmt(limit)) - float(gb_fmt(used)), 0):.2f} گیگابایت"
         if exp:
             left = int((exp - time.time()) // 86400)
             usage += f"\n⏳ زمان باقی‌مانده: {max(left, 0)} روز"
@@ -1114,24 +1154,7 @@ async def handle_admin_decision(update, context, data):
 
 
 # ============================== تایید خودکار با پیامک بانک ==============================
-async def process_sms(bot, text: str, sender: str = "") -> str:
-    if SMS_SENDERS and not any(s.lower() in (sender or "").lower() for s in SMS_SENDERS):
-        return "ignored_sender"
-    t = normalize_digits(text or "")
-    if not t.strip():
-        return "empty"
-    if "برداشت" in t and "واریز" not in t:
-        return "ignored_withdraw"
-    if not any(k in t for k in ("واریز", "+", "deposit", "Deposit", "DEPOSIT")):
-        return "ignored"
-
-    h = hashlib.sha256(t.encode("utf-8")).hexdigest()
-    if not sms_register(h):
-        return "duplicate"
-
-    # فقط خط‌های مربوط به واریز، بدون خط موجودی
-    lines = [ln for ln in t.splitlines() if ("واریز" in ln or "+" in ln) and "موجودی" not in ln]
-    source = " ".join(lines) if lines else t
+def _extract_amounts(source: str):
     nums = []
     for m in re.findall(r"\d[\d,٬،]*", source):
         try:
@@ -1142,9 +1165,35 @@ async def process_sms(bot, text: str, sender: str = "") -> str:
             nums.append(n)
     cands = set()
     for n in nums:
-        cands.add(n)               # تومان
+        cands.add(n)
         if n % 10 == 0:
-            cands.add(n // 10)     # ریال -> تومان
+            cands.add(n // 10)
+    return cands
+
+
+async def process_sms(bot, text: str, sender: str = "") -> str:
+    if SMS_SENDERS and not any(s.lower() in (sender or "").lower() for s in SMS_SENDERS):
+        return "ignored_sender"
+    t = normalize_digits(text or "")
+    if not t.strip():
+        if not throttled(0, "sms_empty", 20):
+            await notify_admin(bot, "ℹ️ پیامک با متن خالی رسید (متغیر ماکرو خالی رفته)")
+        return "empty"
+    if "برداشت" in t and "واریز" not in t:
+        return "ignored_withdraw"
+    if not any(k in t for k in ("واریز", "+", "deposit", "Deposit", "DEPOSIT")):
+        if not throttled(0, "sms_ign", 20):
+            await notify_admin(bot, f"ℹ️ پیامک نادیده گرفته شد (کلمه واریز ندارد):\n\n{t[:500]}")
+        return "ignored"
+
+    h = hashlib.sha256(t.encode("utf-8")).hexdigest()
+    if sms_seen(h):
+        return "duplicate"
+
+    lines = [ln for ln in t.splitlines() if ("واریز" in ln or "+" in ln) and "موجودی" not in ln]
+    cands = _extract_amounts(" ".join(lines)) if lines else set()
+    if not cands:
+        cands = _extract_amounts(t)
 
     rows = find_open_orders_by_amounts(list(cands))
     if not rows:
@@ -1172,6 +1221,7 @@ async def process_sms(bot, text: str, sender: str = "") -> str:
         claim_order(oid, "processing", "pending")
         await notify_admin(bot, f"⚠️ تایید خودکار سفارش #{oid} ناموفق بود:\n{err}")
         return "failed"
+    sms_register(h)
     await notify_admin(bot, f"✅ سفارش #{oid} ({KIND_FA.get(o['kind'], o['kind'])} | {fmt(o['amount'])} تومان | "
                             f"کاربر {o['user_id']}) با پیامک بانک خودکار تایید شد.")
     return "ok"
@@ -1195,6 +1245,10 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK - bot is running")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
     def do_POST(self):
         try:
@@ -1331,7 +1385,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await notify_admin(
             context.bot,
             f"🤝 درخواست نمایندگی جدید\n\n👤 نام: {user.full_name}\n"
-            f"🆔 یوزرنیم: @{user.username or 'ندارد'}\n🔢 آیدی: {user_id}\n\n💬 متن پیام:\n{text}")
+            f"🆔 یوزرنیم: @{user.username or 'ندارد'}\n🔢 آیدی: {user_id}\n\n💬 متن پیام:\n{text}\n\n"
+            f"پاسخ: /sendto {user_id} متن")
         await update.message.reply_text("🚀 پیام شما ارسال شد منتظر پاسخ مدیریت باشید.",
                                         reply_markup=main_keyboard())
         return
@@ -1516,7 +1571,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ack(q)
         return
 
-    # ---------- شاخه‌هایی که خودشان answer می‌دهند ----------
     if data == "send_receipt":
         oid = context.user_data.get("order_id")
         o = get_order(oid) if oid else None
@@ -1694,7 +1748,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await ack(q)
 
-    # ---------- بقیه ----------
     if data == "none":
         return
 
@@ -1905,11 +1958,14 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_adminhelp(update, context):
     await update.message.reply_text(
         "🛠 دستورات ادمین:\n\n"
-        "/stats — آمار\n/orders — سفارش‌های باز\n"
+        "/stats — آمار کلی\n/sales — گزارش فروش (امروز/هفته/ماه)\n/orders — سفارش‌های باز\n"
+        "/expiring — سرویس‌های نزدیک انقضا\n"
         "/userinfo ID — اطلاعات کاربر\n"
         "/addbalance ID AMOUNT — افزایش موجودی\n"
+        "/sendto ID متن — پیام مستقیم به کاربر\n"
         "/ban ID — مسدود کردن\n/unban ID — رفع مسدودی\n"
         "/maintenance on|off — حالت تعمیر\n"
+        "/setcard شماره [نام] — تغییر کارت پرداخت\n"
         "/adddiscount CODE PERCENT [MAX]\n/discounts — لیست کدها\n/deldiscount CODE\n"
         "/addgift CODE AMOUNT\n/broadcast متن (یا ریپلای)\n"
         "/smstest متن پیامک — تست تایید خودکار\n"
@@ -1937,6 +1993,13 @@ async def cmd_stats(update, context):
         f"🏦 شارژ کیف پول: {fmt(cred)} تومان")
 
 
+async def cmd_sales(update, context):
+    await update.message.reply_text(
+        "\n\n".join([sales_summary(86400, "۲۴ ساعت اخیر"),
+                     sales_summary(7 * 86400, "۷ روز اخیر"),
+                     sales_summary(30 * 86400, "۳۰ روز اخیر")]))
+
+
 async def cmd_orders(update, context):
     with conn() as c:
         rows = c.execute("SELECT * FROM orders WHERE status IN ('pending','processing') "
@@ -1946,6 +2009,27 @@ async def cmd_orders(update, context):
         return
     lines = [f"#{r['id']} | {r['kind']} | کاربر {r['user_id']} | {fmt(r['amount'])} | {r['status']}" for r in rows]
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_expiring(update, context):
+    svcs = all_services()[:60]
+    sem = asyncio.Semaphore(5)
+
+    async def one(s):
+        async with sem:
+            return s, await panel_get_user(s["username"])
+
+    res = await asyncio.gather(*(one(s) for s in svcs))
+    now = time.time()
+    lines = []
+    for s, info in res:
+        if not info:
+            continue
+        exp = parse_expire(info.get("expire"))
+        if exp and 0 < exp - now < 3 * 86400:
+            lines.append(f"• {s['username']} | کاربر {s['user_id']} | {max(int((exp - now) // 86400), 0)} روز")
+    await update.message.reply_text(
+        "\n".join(["⏰ نزدیک انقضا:"] + lines) if lines else "سرویسی نزدیک انقضا نیست.")
 
 
 async def cmd_userinfo(update, context):
@@ -1972,6 +2056,15 @@ async def cmd_addbalance(update, context):
     add_balance(uid, amount)
     await update.message.reply_text(f"✅ انجام شد. موجودی فعلی: {fmt(get_balance(uid))}")
     await safe_send(context.bot, uid, f"💰 {fmt(amount)} تومان به موجودی شما اضافه شد.")
+
+
+async def cmd_sendto(update, context):
+    parts = (update.message.text or "").split(None, 2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        await update.message.reply_text("استفاده: /sendto user_id متن پیام")
+        return
+    ok = await safe_send(context.bot, int(parts[1]), parts[2])
+    await update.message.reply_text("✅ ارسال شد." if ok else "❌ ارسال ناموفق (کاربر ربات را بلاک کرده یا آیدی اشتباه است).")
 
 
 async def cmd_ban(update, context):
@@ -2003,6 +2096,19 @@ async def cmd_maintenance(update, context):
         return
     set_setting("maintenance", "1" if context.args[0] == "on" else "0")
     await update.message.reply_text("🛠 حالت تعمیر " + ("فعال شد." if context.args[0] == "on" else "غیرفعال شد."))
+
+
+async def cmd_setcard(update, context):
+    if not context.args:
+        await update.message.reply_text(
+            f"💳 کارت فعلی: {card_number()}\nنام: {card_owner() or '-'}\n\n"
+            "تغییر: /setcard 6037-1234-5678-9012 نام صاحب کارت")
+        return
+    set_setting("card_number", context.args[0])
+    owner = " ".join(context.args[1:]).strip()
+    if owner:
+        set_setting("card_owner", owner)
+    await update.message.reply_text(f"✅ کارت پرداخت تغییر کرد:\n{card_number()}\n{card_owner() or ''}")
 
 
 async def cmd_adddiscount(update, context):
@@ -2103,7 +2209,7 @@ async def cmd_broadcast(update, context):
     await msg.reply_text(f"📣 ارسال شد: {ok} | ناموفق: {fail}")
 
 
-# ============================== بکاپ، یادآوری و سلامت ==============================
+# ============================== بکاپ، یادآوری و گزارش ==============================
 def do_backup() -> str:
     path = os.path.join(DATA_DIR, f"backup_{datetime.now().strftime('%a')}.db")
     src = sqlite3.connect(DB_PATH)
@@ -2136,6 +2242,39 @@ async def expire_loop():
                 logger.info(f"{n} سفارش منقضی شد")
         except Exception as e:
             logger.error(f"expire_loop: {e}")
+
+
+async def daily_report_loop(app):
+    await asyncio.sleep(600)
+    while True:
+        await asyncio.sleep(24 * 3600)
+        try:
+            txt = await asyncio.to_thread(sales_summary, 86400, "گزارش روزانه (۲۴ ساعت اخیر)")
+            await notify_admin(app.bot, txt)
+        except Exception as e:
+            logger.error(f"daily_report: {e}")
+
+
+async def profile_loop(app):
+    """تعداد کاربران را هر یک ساعت در توضیحات بات به‌روز می‌کند."""
+    await asyncio.sleep(20)
+    last = None
+    while True:
+        try:
+            n = await asyncio.to_thread(count_users)
+            if n != last:
+                await app.bot.set_my_short_description(f"👥 {fmt(n)} کاربر | فروشگاه {BRAND_TITLE}")
+                await app.bot.set_my_description(
+                    f"🚀 فروشگاه {BRAND_TITLE}\n"
+                    f"👥 تعداد کاربران ربات: {fmt(n)}\n\n"
+                    "✅ اتصال پرسرعت، پایدار و بدون قطعی\n"
+                    "🧪 تست رایگان قبل از خرید\n"
+                    "🛟 پشتیبانی ۲۴ ساعته\n\n"
+                    "برای شروع روی Start بزنید.")
+                last = n
+        except Exception as e:
+            logger.warning(f"profile_loop: {e}")
+        await asyncio.sleep(3600)
 
 
 async def run_reminders(bot):
@@ -2205,6 +2344,8 @@ async def post_init(app: Application):
     _BG_TASKS.append(asyncio.create_task(backup_loop(app)))
     _BG_TASKS.append(asyncio.create_task(expire_loop()))
     _BG_TASKS.append(asyncio.create_task(reminder_loop(app)))
+    _BG_TASKS.append(asyncio.create_task(daily_report_loop(app)))
+    _BG_TASKS.append(asyncio.create_task(profile_loop(app)))
 
 
 async def post_shutdown(app: Application):
@@ -2234,12 +2375,16 @@ def main():
     app.add_handler(CommandHandler("start", start, filters=private))
     app.add_handler(CommandHandler("adminhelp", cmd_adminhelp, filters=admin_only))
     app.add_handler(CommandHandler("stats", cmd_stats, filters=admin_only))
+    app.add_handler(CommandHandler("sales", cmd_sales, filters=admin_only))
     app.add_handler(CommandHandler("orders", cmd_orders, filters=admin_only))
+    app.add_handler(CommandHandler("expiring", cmd_expiring, filters=admin_only))
     app.add_handler(CommandHandler("userinfo", cmd_userinfo, filters=admin_only))
     app.add_handler(CommandHandler("addbalance", cmd_addbalance, filters=admin_only))
+    app.add_handler(CommandHandler("sendto", cmd_sendto, filters=admin_only))
     app.add_handler(CommandHandler("ban", cmd_ban, filters=admin_only))
     app.add_handler(CommandHandler("unban", cmd_unban, filters=admin_only))
     app.add_handler(CommandHandler("maintenance", cmd_maintenance, filters=admin_only))
+    app.add_handler(CommandHandler("setcard", cmd_setcard, filters=admin_only))
     app.add_handler(CommandHandler("adddiscount", cmd_adddiscount, filters=admin_only))
     app.add_handler(CommandHandler("discounts", cmd_discounts, filters=admin_only))
     app.add_handler(CommandHandler("deldiscount", cmd_deldiscount, filters=admin_only))
