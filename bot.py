@@ -1,5 +1,6 @@
 # requirements: python-telegram-bot==22.* httpx qrcode[pil]
 # اختیاری: فایل .env کنار bot.py با خطوط KEY=VALUE
+# متغیرهای درگاه: PUBLIC_URL (https://your-domain.com) ، ZARINPAL_MERCHANT ، PORT
 import asyncio
 import hashlib
 import html
@@ -77,6 +78,11 @@ REFERRAL_PERCENT = int(os.environ.get("REFERRAL_PERCENT", "5"))
 # تایید خودکار با پیامک بانک (وب‌هوک)
 SMS_SECRET = os.environ.get("SMS_SECRET", "").strip()
 SMS_SENDERS = [s.strip() for s in os.environ.get("SMS_SENDERS", "").split(",") if s.strip()]
+
+# درگاه پرداخت اینترنتی (زرین‌پال)
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+ZP_MERCHANT = os.environ.get("ZARINPAL_MERCHANT", "").strip()
+GATEWAY_ON = bool(PUBLIC_URL and ZP_MERCHANT and PORT)
 
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bot.db")
@@ -292,6 +298,9 @@ def init_db():
         cols = [r["name"] for r in c.execute("PRAGMA table_info(users)")]
         if "banned" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
+        ocols = [r["name"] for r in c.execute("PRAGMA table_info(orders)")]
+        if "authority" not in ocols:
+            c.execute("ALTER TABLE orders ADD COLUMN authority TEXT")
 
 
 # ---- تنظیمات ----
@@ -438,6 +447,11 @@ def get_order(oid):
         return c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
 
 
+def set_authority(oid, auth):
+    with conn() as c:
+        c.execute("UPDATE orders SET authority=? WHERE id=?", (auth, oid))
+
+
 def user_orders(uid, limit=10):
     with conn() as c:
         return c.execute("SELECT * FROM orders WHERE user_id=? AND status NOT IN ('cancelled','expired') "
@@ -477,7 +491,8 @@ def cancel_awaiting(oid):
     if not oid:
         return
     o = get_order(oid)
-    if o and claim_order(oid, "awaiting_receipt", "cancelled"):
+    # سفارش‌های درگاه نباید لغو شوند (ممکن است کاربر در حال پرداخت باشد)
+    if o and o["method"] != "gateway" and claim_order(oid, "awaiting_receipt", "cancelled"):
         release_discount(o["discount_code"])
 
 
@@ -906,6 +921,8 @@ def confirm_menu(order):
     rows = []
     if not order.get("discount_code"):
         rows.append([InlineKeyboardButton("🎁 اعمال کد تخفیف", callback_data="apply_discount")])
+    if GATEWAY_ON:
+        rows.append([InlineKeyboardButton("🏦 درگاه اینترنتی شاپرک (بدون کارمزد)", callback_data="paygw")])
     rows.append([InlineKeyboardButton("💳 پرداخت ریالی (کارت به کارت)", callback_data="paycard")])
     rows.append([InlineKeyboardButton("💰 پرداخت از موجودی کیف پول", callback_data="paywallet")])
     rows.append([InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="menu")])
@@ -1113,6 +1130,93 @@ async def handle_admin_decision(update, context, data):
         pass
 
 
+# ============================== درگاه پرداخت (زرین‌پال) ==============================
+ZP_API = "https://payment.zarinpal.com/pg/v4/payment"
+ZP_START = "https://payment.zarinpal.com/pg/StartPay/"
+
+
+def _zp_data(j):
+    d = j.get("data") if isinstance(j, dict) else None
+    return d if isinstance(d, dict) else {}
+
+
+async def gw_request(oid, amount):
+    payload = {
+        "merchant_id": ZP_MERCHANT,
+        "amount": int(amount),
+        "currency": "IRT",  # مبلغ به تومان
+        "callback_url": f"{PUBLIC_URL}/pay/callback?oid={oid}",
+        "description": f"سفارش #{oid}",
+    }
+    try:
+        r = await HTTP.post(f"{ZP_API}/request.json", json=payload, timeout=25.0,
+                            headers={"Accept": "application/json"})
+        j = r.json()
+        d = _zp_data(j)
+        if d.get("code") == 100 and d.get("authority"):
+            return True, d["authority"]
+        return False, str(j.get("errors") or j)[:300]
+    except Exception as e:
+        return False, f"خطا در اتصال به درگاه: {e}"
+
+
+async def gw_verify(authority, amount):
+    try:
+        r = await HTTP.post(f"{ZP_API}/verify.json", timeout=25.0,
+                            headers={"Accept": "application/json"},
+                            json={"merchant_id": ZP_MERCHANT, "amount": int(amount),
+                                  "authority": authority})
+        d = _zp_data(r.json())
+        return d.get("code") in (100, 101), str(d.get("ref_id") or "")
+    except Exception as e:
+        logger.warning(f"gw_verify: {e}")
+        return False, ""
+
+
+async def gw_settle(bot, oid) -> str:
+    """نتیجه: ok | done | unpaid | busy | invalid | failed"""
+    o = get_order(oid)
+    if not o or o["method"] != "gateway" or not o["authority"]:
+        return "invalid"
+    if o["status"] == "done":
+        return "done"
+    if o["status"] not in ("awaiting_receipt", "pending"):
+        return "busy"
+    paid, ref = await gw_verify(o["authority"], o["amount"])
+    if not paid:
+        return "unpaid"
+    if not (claim_order(oid, "awaiting_receipt", "processing") or claim_order(oid, "pending", "processing")):
+        return "busy"
+    try:
+        ok, err = await fulfill_order(bot, oid)
+    except Exception as e:
+        ok, err = False, f"استثنا: {e}"
+        logger.exception("gw fulfill")
+    if not ok:
+        claim_order(oid, "processing", "pending")  # با «بررسی وضعیت» دوباره تلاش می‌شود
+        await notify_admin(bot, f"⚠️ پرداخت درگاه سفارش #{oid} تایید شد ولی ساخت سرویس ناموفق بود:\n{err}")
+        return "failed"
+    await notify_admin(bot, f"✅ سفارش #{oid} ({KIND_FA.get(o['kind'], o['kind'])} | {fmt(o['amount'])} تومان | "
+                            f"کاربر {o['user_id']}) با درگاه پرداخت شد. ref: {ref}")
+    return "ok"
+
+
+def gw_text(amount, oid) -> str:
+    return (f"💵 مبلغ نهایی قابل پرداخت: <b>{fmt(amount)}</b> تومان\n\n"
+            f"🖨 کد پیگیری: <code>{oid}</code>\n\n"
+            "🛍 جهت پرداخت روی دکمه «ورود به درگاه پرداخت» بزنید.\n"
+            "✅ بعد از پرداخت، سرویس به‌صورت خودکار ساخته و ارسال می‌شود و نیازی به ارسال رسید نیست.\n"
+            "♻️ اگر سرویس نیامد، «بررسی وضعیت پرداخت» را بزنید.")
+
+
+def gw_markup(url, oid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌐 ورود به درگاه پرداخت", url=url)],
+        [InlineKeyboardButton("♻️ بررسی وضعیت پرداخت", callback_data=f"gwcheck_{oid}")],
+        [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="menu")],
+    ])
+
+
 # ============================== تایید خودکار با پیامک بانک ==============================
 async def process_sms(bot, text: str, sender: str = "") -> str:
     if SMS_SENDERS and not any(s.lower() in (sender or "").lower() for s in SMS_SENDERS):
@@ -1190,7 +1294,51 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _page(self, code, title, msg, ok):
+        color = "#16a34a" if ok else "#dc2626"
+        link = f"https://t.me/{_BOT.username}" if _BOT else "#"
+        body = (f'<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">'
+                f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+                f'<title>{esc(title)}</title></head>'
+                f'<body style="font-family:sans-serif;text-align:center;padding:40px 16px">'
+                f'<h2 style="color:{color}">{esc(title)}</h2><p>{esc(msg)}</p>'
+                f'<p><a href="{link}" style="display:inline-block;background:#229ed9;color:#fff;'
+                f'padding:12px 24px;border-radius:10px;text-decoration:none">بازگشت به ربات</a></p>'
+                f'</body></html>').encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _pay_callback(self, u):
+        q = parse_qs(u.query)
+        try:
+            oid = int((q.get("oid") or ["0"])[0])
+        except ValueError:
+            oid = 0
+        authority = (q.get("Authority") or [""])[0]
+        status = (q.get("Status") or [""])[0]
+        o = get_order(oid) if oid else None
+        if not o or o["method"] != "gateway" or o["authority"] != authority:
+            return self._page(400, "خطا", "سفارش نامعتبر است.", False)
+        if status != "OK":
+            return self._page(200, "پرداخت ناموفق", "پرداخت انجام نشد یا لغو شد.", False)
+        if _BOT is None or _LOOP is None:
+            return self._page(503, "خطا", "سرویس موقتاً در دسترس نیست؛ داخل ربات «بررسی وضعیت پرداخت» را بزنید.", False)
+        try:
+            res = asyncio.run_coroutine_threadsafe(gw_settle(_BOT, oid), _LOOP).result(timeout=90)
+        except Exception as e:
+            logger.error(f"pay_callback: {e}")
+            res = "failed"
+        if res in ("ok", "done", "busy"):
+            return self._page(200, "پرداخت موفق ✅", "سرویس شما داخل ربات ارسال شد.", True)
+        return self._page(200, "در حال بررسی", "داخل ربات دکمه «بررسی وضعیت پرداخت» را بزنید.", False)
+
     def do_GET(self):
+        u = urlparse(self.path)
+        if u.path.rstrip("/") == "/pay/callback":
+            return self._pay_callback(u)
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
@@ -1529,6 +1677,31 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                        reply_markup=cancel_receipt_keyboard())
         return
 
+    if data.startswith("gwcheck_"):
+        try:
+            oid = int(data[8:])
+        except ValueError:
+            await ack(q)
+            return
+        o = get_order(oid)
+        if not o or o["user_id"] != user_id:
+            await ack(q, "سفارش پیدا نشد.", True)
+            return
+        if throttled(user_id, "gwc", 3):
+            await ack(q)
+            return
+        await ack(q, "⏳ در حال بررسی...")
+        res = await gw_settle(context.bot, oid)
+        msgs = {
+            "ok": "✅ پرداخت شما تایید شد و سرویس برایتان ارسال شد.",
+            "done": "✅ این سفارش قبلاً انجام و سرویس ارسال شده است.",
+            "busy": "⏳ سفارش در حال پردازش است، چند لحظه صبر کنید.",
+            "unpaid": "❌ هنوز پرداختی برای این سفارش ثبت نشده. اگر پرداخت کرده‌اید چند دقیقه بعد دوباره بزنید.",
+            "failed": "⚠️ پرداخت تایید شد ولی ساخت سرویس مشکل داشت؛ ادمین مطلع شد. کمی بعد دوباره بزنید.",
+        }
+        await q.message.reply_text(msgs.get(res, "سفارش نامعتبر است."), reply_markup=main_keyboard())
+        return
+
     if data.startswith("serv_"):
         svc = find_service(data[5:], user_id)
         if not svc:
@@ -1610,7 +1783,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                            reply_markup=duration_menu())
         return
 
-    if data in ("paycard", "paywallet"):
+    if data in ("paycard", "paywallet", "paygw"):
         order = context.user_data.get("order")
         if not valid_order(order):
             await ack(q, "نشست منقضی شد. دوباره از منو شروع کن.", True)
@@ -1643,6 +1816,27 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             order.pop("discount_percent", None)
             await ack(q, "ظرفیت این کد تخفیف تمام شده.", True)
             await show_order_confirm(q, order)
+            return
+
+        if data == "paygw":
+            if not GATEWAY_ON:
+                release_discount(code)
+                await ack(q, "درگاه فعال نیست.", True)
+                return
+            await ack(q, "⏳ در حال ساخت لینک پرداخت...")
+            oid = create_order(user_id, order["kind"], amount, order["dk"], order["vk"],
+                               order["username"], code, "gateway", "awaiting_receipt")
+            ok, auth = await gw_request(oid, amount)
+            if not ok:
+                if claim_order(oid, "awaiting_receipt", "cancelled"):
+                    release_discount(code)
+                await notify_admin(context.bot, f"⚠️ خطا در ساخت پرداخت درگاه برای {user_id}:\n{auth}")
+                await q.edit_message_text("❌ ساخت لینک پرداخت ناموفق بود. چند دقیقه بعد دوباره تلاش کنید.",
+                                          reply_markup=back_menu_kb())
+                return
+            set_authority(oid, auth)
+            await q.edit_message_text(gw_text(amount, oid), parse_mode=HTML,
+                                      reply_markup=gw_markup(ZP_START + auth, oid))
             return
 
         if data == "paycard":
@@ -1923,7 +2117,7 @@ async def cmd_stats(update, context):
         svcs = c.execute("SELECT COUNT(*) n FROM services").fetchone()["n"]
         pend = c.execute("SELECT COUNT(*) n FROM orders WHERE status IN ('pending','processing')").fetchone()["n"]
         rev = c.execute("SELECT COALESCE(SUM(amount),0) s FROM orders WHERE status='done' "
-                        "AND method='card' AND kind!='credit'").fetchone()["s"]
+                        "AND method IN ('card','gateway') AND kind!='credit'").fetchone()["s"]
         wal = c.execute("SELECT COALESCE(SUM(amount),0) s FROM orders WHERE status='done' "
                         "AND method='wallet'").fetchone()["s"]
         cred = c.execute("SELECT COALESCE(SUM(amount),0) s FROM orders WHERE status='done' "
@@ -1933,7 +2127,7 @@ async def cmd_stats(update, context):
     await update.message.reply_text(
         f"📊 آمار\n\n👥 کاربران: {users} (امروز: {new_today} | مسدود: {banned})\n"
         f"📦 سرویس‌ها: {svcs}\n🕓 سفارش‌های باز: {pend}\n"
-        f"💳 فروش کارت‌به‌کارت: {fmt(rev)} تومان\n💰 فروش از کیف پول: {fmt(wal)} تومان\n"
+        f"💳 فروش کارت/درگاه: {fmt(rev)} تومان\n💰 فروش از کیف پول: {fmt(wal)} تومان\n"
         f"🏦 شارژ کیف پول: {fmt(cred)} تومان")
 
 
@@ -2221,6 +2415,8 @@ def main():
         threading.Thread(target=run_web_server, daemon=True).start()
     if SMS_SECRET and not PORT:
         logger.warning("SMS_SECRET تنظیم شده ولی PORT نیست؛ وب‌هوک پیامک فعال نمی‌شود.")
+    if not GATEWAY_ON:
+        logger.info("درگاه پرداخت غیرفعال است (PUBLIC_URL / ZARINPAL_MERCHANT / PORT تنظیم نشده).")
 
     persistence = PicklePersistence(filepath=PERSIST_PATH, update_interval=10)
     app = (Application.builder().token(TOKEN)
