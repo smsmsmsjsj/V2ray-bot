@@ -1896,10 +1896,8 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     clear_flow(context)
     await msg.reply_text(
-        "✅ رسید پرداخت شما دریافت شد. پس از بررسی توسط ادمین به درخواست شما رسیدگی می گردد. لطفا از ارسال مجدد رسید خودداری نمایید. "
-        
-        reply_markup=main_keyboard())
-
+    "✅ رسید پرداخت شما دریافت شد. پس از بررسی توسط ادمین به درخواست شما رسیدگی می گردد. لطفا از ارسال مجدد رسید خودداری نمایید.",
+    reply_markup=main_keyboard())
 
 # ============================== دستورات ادمین ==============================
 async def cmd_adminhelp(update, context):
